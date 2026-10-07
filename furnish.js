@@ -156,9 +156,18 @@ window.createFurnisher = function ({
       .querySelectorAll(".catalog-item")
       .forEach((b) => b.classList.remove("chosen"));
   }
-  function previewAt(p) {
+  function magneticPosition(f, x, z, excludeIndex, e) {
+    if (!$('furnishMagnet').checked || e?.ctrlKey)
+      return { x, z, targetIndex: -1 };
+    return Eco.snapFurniture(getData(), { ...f, x, z }, excludeIndex);
+  }
+  function previewAt(p, e) {
     if (!ghost || !p) return;
-    ghost.position.set(snap(p.x), catalog[pending].y || 0, snap(p.z));
+    const f = catalog[pending];
+    const position = magneticPosition(
+      { ...f, rotation: pendingAngle }, snap(p.x), snap(p.z), -1, e,
+    );
+    ghost.position.set(position.x, f.y || 0, position.z);
     ghost.rotation.y = pendingAngle;
     ghost.visible = true;
   }
@@ -315,16 +324,18 @@ window.createFurnisher = function ({
       save();
       const f = clone(catalog[pending]);
       delete f.category;
-      f.x = snap(p.x);
-      f.z = snap(p.z);
       f.rotation = pendingAngle;
+      const position = magneticPosition(f, snap(p.x), snap(p.z), -1, e);
+      f.x = position.x;
+      f.z = position.z;
       d.furniture.push(f);
       selected = d.furniture.length - 1;
       cancelPlacement();
       syncFurniture();
       refresh();
-      $("furnishMessage").textContent =
-        "Добавлено. Перетаскивайте предмет, меняйте размеры или поворачивайте.";
+      $("furnishMessage").textContent = position.targetIndex >= 0
+        ? "Добавлено с магнитной привязкой. Ctrl отключает магнит при перетаскивании."
+        : "Добавлено. Перетаскивайте предмет, меняйте размеры или поворачивайте.";
       return true;
     }
     const root = getFurniture();
@@ -346,15 +357,22 @@ window.createFurnisher = function ({
   }
   function move(e) {
     if (active && pending !== null && !e.buttons) {
-      previewAt(point(e));
+      previewAt(point(e), e);
       return false;
     }
     if (!active || !drag) return false;
     const p = point(e);
     if (!p) return true;
     const f = current(),
-      x = snap(drag.fx + p.x - drag.x),
-      z = snap(drag.fz + p.z - drag.z);
+      position = magneticPosition(
+        f,
+        snap(drag.fx + p.x - drag.x),
+        snap(drag.fz + p.z - drag.z),
+        selected,
+        e,
+      ),
+      x = position.x,
+      z = position.z;
     if (f.x === x && f.z === z) return true;
     if (!drag.moved) {
       save();
@@ -363,6 +381,10 @@ window.createFurnisher = function ({
     f.x = x;
     f.z = z;
     refresh();
+    if (position.targetIndex >= 0)
+      $("furnishMessage").textContent = "Магнитная привязка. Удерживайте Ctrl для свободного перемещения.";
+    else if (drag.magnetHint) $("furnishMessage").textContent = "Свободное перемещение.";
+    drag.magnetHint = position.targetIndex >= 0;
     return true;
   }
   function change(fn) {

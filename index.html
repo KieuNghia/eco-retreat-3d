@@ -63,12 +63,15 @@
         Выберите карточку → наведите на пол → клик для установки. Левая кнопка
         на мебели — двигать. <b>Alt + левая — вращать камеру</b>, правая —
         сдвигать, колесо — приближать. R — поворот предмета, Delete — удалить.
+        Магнит притягивает близкие грани; Ctrl временно отключает его.
       </p>
       <div class="furnish-row">
         <button id="furnishUndo">↶ Отменить</button
         ><button id="furnishRedo">↷ Повторить</button
         ><label
           ><input id="furnishSnap" type="checkbox" checked /> Шаг 5 см</label
+        ><label
+          ><input id="furnishMagnet" type="checkbox" checked /> Магнит 20 см</label
         >
       </div>
       <h3>Каталог · габариты X × Z × высота</h3>
@@ -274,6 +277,7 @@
     <script src="kitchen-mesh.js"></script>
     <script src="model-state.js"></script>
     <script src="collisions.js"></script>
+    <script src="furniture-snap.js"></script>
     <script src="geometry.js"></script>
     <script src="furniture-mesh.js"></script>
     <script src="previews.js"></script>

@@ -266,6 +266,8 @@ assert(
   "Editor and tape are mutually exclusive",
 );
 assert(latest.camera.isPerspectiveCamera, "Furnishing opens in 3D");
+// Keep legacy exact-coordinate gesture assertions independent of the new magnet.
+document.getElementById("furnishMagnet").checked = false;
 assert.equal(previewRenders, sandbox.furnitureCatalog.length);
 assert(
   nodes.furnishCatalog.children.every((b) =>
@@ -434,6 +436,32 @@ assert(
   "Moving furniture does not orbit camera",
 );
 console.log("Perspective dragging preserves floor position and camera");
+
+const snap = sandbox.Eco.snapFurniture;
+const snapData = {
+  width: 10,
+  depth: 10,
+  wallThickness: 0.16,
+  walls: [],
+  furniture: [{ type: "wardrobe", x: 4, z: 4, w: 1, d: 0.6, h: 2 }],
+};
+const cabinet = { type: "wardrobe", x: 5.63, z: 4.08, w: 2, d: 0.6, h: 2 };
+const joined = snap(snapData, cabinet);
+assert(Math.abs(joined.x - 5.5) < 1e-8);
+assert(Math.abs(joined.z - 4) < 1e-8, "Cabinet ends align");
+assert.equal(joined.targetIndex, 0);
+assert.equal(snap(snapData, { ...cabinet, x: 5.85 }).targetIndex, -1);
+snapData.furniture[0].rotation = Math.PI / 2;
+const rotated = snap(snapData, { ...cabinet, x: 4.08, z: 5.63, rotation: Math.PI / 2 });
+assert(Math.abs(rotated.x - 4) < 1e-8 && Math.abs(rotated.z - 5.5) < 1e-8);
+snapData.furniture[0].rotation = 0;
+snapData.furniture.push({ type: "wardrobe", x: 5.5, z: 4, w: 0.2, d: 0.6, h: 2 });
+assert.equal(snap(snapData, cabinet).targetIndex, -1, "Blocked snap is rejected");
+snapData.furniture = [{ type: "dining", x: 4, z: 4, w: 1.2, d: 0.8, h: 0.75 }];
+const chair = snap(snapData, { type: "diningChair", x: 5.07, z: 4, w: 0.6, d: 0.55, h: 0.9 });
+assert.equal(chair.targetIndex, 0);
+assert(Math.abs(chair.x - 4.9) < 1e-8, "Chair meets table edge");
+console.log("Furniture magnet joins cabinets and chairs without crossing obstacles");
 
 module.exports = {
   THREE,

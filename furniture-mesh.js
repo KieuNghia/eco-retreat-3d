@@ -34,7 +34,7 @@ Eco.makeFurniture = (() => {
         let p = b(w * 0.3, 0.61, zz, w * 0.22, 0.12, d * 0.43, "#fff8ed");
         p.rotation.z = -0.08;
       }
-    } else if (f.type === "sofa") {
+    } else if (f.type === "sofa" || f.type === "sofaBed") {
       b(0, 0.26, 0, w, 0.34, d, c);
       b(-w * 0.39, 0.57, 0, w * 0.2, 0.67, d, c);
       for (const z of [-d * 0.46, d * 0.46])
@@ -43,6 +43,11 @@ Eco.makeFurniture = (() => {
         b(w * 0.07, 0.47, z, w * 0.72, 0.17, d * 0.43, "#ede2cd");
       let pillow = b(-w * 0.08, 0.68, d * 0.18, 0.3, 0.32, 0.36, "#6c7152");
       pillow.rotation.z = 0.2;
+      if (f.type === "sofaBed") {
+        b(w * 0.46, 0.23, 0, 0.05, 0.18, d * 0.85, "#796d65");
+        b(w * 0.49, 0.23, 0, 0.012, 0.025, d * 0.2, "#d5d0c7");
+        b(w * 0.08, 0.565, 0, w * 0.64, 0.012, 0.012, "#b4a89b");
+      }
     } else if (["chair", "outdoorChair", "diningChair"].includes(f.type)) {
       b(0, 0.42, 0, w, 0.12, d, c);
       b(0, 0.69, d * 0.44, w, 0.52, 0.08, c);
@@ -79,6 +84,44 @@ Eco.makeFurniture = (() => {
       b(0, 0.785, -d * 0.01, 0.32, 0.006, 0.18, "#87959b");
       b(0, 0.95, -d * 0.19, 0.36, 0.38, 0.02, "#2e3942");
       b(0, 0.96, -d * 0.19 + 0.012, 0.32, 0.32, 0.006, "#527f9b");
+    } else if (f.type === "shoeCabinet") {
+      b(0, f.h / 2, 0, w, f.h, d, c);
+      for (const y of [f.h * 0.29, f.h * 0.65]) {
+        b(0, y, d * 0.49, w * 0.92, f.h * 0.3, 0.012, "#d8c4a7");
+        b(0, y + f.h * 0.11, d * 0.5, w * 0.27, 0.018, 0.012, "#766c60");
+      }
+    } else if (f.type === "coatRack") {
+      b(0, f.h / 2, -d * 0.46, w, f.h, d * 0.08, c);
+      b(0, f.h * 0.92, 0, w * 0.95, 0.06, d, "#c3ad8f");
+      b(0, f.h * 0.12, 0, w * 0.95, 0.06, d * 0.85, "#c3ad8f");
+      for (const x of [-w * 0.28, 0, w * 0.28]) {
+        b(x, f.h * 0.72, d * 0.18, 0.035, 0.05, d * 0.55, "#6a6e68");
+        b(x, f.h * 0.69, d * 0.43, 0.06, 0.08, 0.03, "#6a6e68");
+      }
+    } else if (f.type === "bench") {
+      b(0, f.h - 0.045, 0, w, 0.09, d, c);
+      for (const x of [-w * 0.43, w * 0.43])
+        for (const z of [-d * 0.38, d * 0.38])
+          b(x, (f.h - 0.09) / 2, z, 0.05, f.h - 0.09, 0.05, "#806950");
+      b(0, f.h * 0.26, 0, w * 0.82, 0.035, d * 0.75, "#a48c70");
+    } else if (f.type === "mirror") {
+      b(0, f.h / 2, 0, w, f.h, d, "#a78965");
+      b(
+        0,
+        f.h / 2,
+        d * 0.43,
+        w - 0.08,
+        f.h - 0.08,
+        0.01,
+        mat(c, { metalness: 0.55, roughness: 0.16 }),
+      );
+    } else if (f.type === "outdoorTable") {
+      b(0, f.h - 0.035, 0, w, 0.07, d, c);
+      for (const x of [-w * 0.39, w * 0.39])
+        for (const z of [-d * 0.39, d * 0.39])
+          b(x, (f.h - 0.07) / 2, z, 0.045, f.h - 0.07, 0.045, "#7a6c58");
+      for (const z of [-d * 0.28, 0, d * 0.28])
+        b(0, f.h - 0.005, z, w * 0.9, 0.01, d * 0.08, "#d6c4a4");
     } else if (["coffee", "side", "dining", "desk"].includes(f.type)) {
       const top =
         f.type === "coffee" ? 0.41 : f.type === "side" ? 0.54 : 0.7825;
