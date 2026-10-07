@@ -1,0 +1,132 @@
+#drawing {
+  width: 96vw;
+  max-width: 1500px;
+  height: 92vh;
+  box-sizing: border-box;
+}
+.drawing-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 14px;
+  height: calc(100% - 210px);
+  min-height: 300px;
+}
+#drawingCanvas {
+  overflow: auto;
+  background: white;
+  border: 1px solid #ccd5da;
+}
+#drawingSvg {
+  display: block;
+  max-width: none;
+  height: auto;
+}
+.dimension-table {
+  overflow: auto;
+}
+.dimension-table table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.dimension-table th {
+  position: sticky;
+  top: 0;
+  background: #e5edf0;
+}
+.dimension-table td,
+.dimension-table th {
+  padding: 7px;
+  border-bottom: 1px solid #ccd5da;
+  text-align: left;
+}
+.dimension-table tr {
+  cursor: pointer;
+}
+.dimension-table tr.selected {
+  background: #ffe1b9;
+}
+.dim-label {
+  font:
+    600 12px "Segoe UI",
+    sans-serif;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 4px;
+  fill: #183d52;
+  stroke-linejoin: round;
+}
+.room-label {
+  font:
+    13px "Segoe UI",
+    sans-serif;
+  text-anchor: middle;
+  fill: #687f88;
+  pointer-events: none;
+}
+.wall-dimension {
+  cursor: pointer;
+}
+.wall-dimension.selected .wall-stroke {
+  stroke: #ee7829;
+}
+.wall-dimension.selected .dim-label {
+  fill: #c54810;
+  font-size: 16px;
+}
+#tapePanel {
+  position: fixed;
+  right: 20px;
+  top: 110px;
+  max-width: 300px;
+  padding: 15px;
+  background: #fffef4f5;
+  border: 1px solid #d6b987;
+  border-radius: 12px;
+  z-index: 5;
+  font-size: 13px;
+  box-shadow: 0 4px 20px #243b4822;
+}
+#tapePanel[hidden] {
+  display: none;
+}
+#tapeResult {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 17px;
+  color: #b74718;
+}
+#tapePanel label {
+  display: block;
+  margin: 8px 0;
+}
+#tapePanel p {
+  line-height: 1.5;
+}
+#tapePanel button {
+  padding: 6px 12px;
+}
+#drawing .source-tools {
+  flex-wrap: wrap;
+}
+@media (max-width: 800px) {
+  .drawing-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .dimension-table {
+    max-height: 230px;
+  }
+  #drawingCanvas {
+    max-height: 55vh;
+  }
+  #tapePanel {
+    top: 165px;
+    right: 8px;
+    max-width: 210px;
+  }
+  header nav {
+    flex-wrap: wrap;
+  }
+}
