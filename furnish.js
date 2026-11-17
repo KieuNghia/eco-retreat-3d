@@ -12,6 +12,8 @@ window.createFurnisher = function ({
   setMode,
   onStart,
   onResize,
+  shadowsDirty,
+  applyModel,
 }) {
   const $ = (id) => document.getElementById(id),
     catalog = window.furnitureCatalog,
@@ -25,8 +27,54 @@ window.createFurnisher = function ({
     drag = null,
     ghost = null,
     pendingAngle = 0,
-    previews = null,
-    cameraTool = false;
+    cameraTool = false,
+    refreshPending = false;
+  // Sparse by catalog index: undefined = not rendered yet, false = failed.
+  const previews = [],
+    requested = new Set();
+  let previewsPending = false;
+  function fillPreviews() {
+    document.querySelectorAll(".catalog-item").forEach((button) => {
+      const image = button.querySelector("img"),
+        src = previews[Number(button.dataset.catalogIndex)];
+      if (image && src) {
+        image.src = src;
+        image.hidden = false;
+      }
+    });
+  }
+  function requestPreviews() {
+    if (previewsPending) return;
+    const category = $("furnishCategory").value,
+      missing = [];
+    catalog.forEach((f, i) => {
+      if (
+        previews[i] === undefined &&
+        !requested.has(i) &&
+        (!category || category === "all" || f.category === category)
+      )
+        missing.push(i);
+      });
+    if (!missing.length) return;
+    previewsPending = true;
+    missing.forEach((i) => requested.add(i));
+    Promise.resolve()
+      .then(() => getPreviews(catalog, missing))
+      .then((images) => {
+        for (const { index, src } of images) previews[index] = src;
+      })
+      .catch((e) => {
+        console.warn("Превью недоступны", e);
+        for (const i of missing)
+          if (previews[i] === undefined) previews[i] = false;
+      })
+      .finally(() => {
+        previewsPending = false;
+        fillPreviews();
+        // Category may have changed while a render was in flight.
+        if (active) requestPreviews();
+      });
+  }
   const outline = new THREE.LineLoop(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: 0xe98b24, depthTest: false }),
@@ -36,15 +84,36 @@ window.createFurnisher = function ({
   outline.visible = false;
   scene.add(outline);
   const clone = (v) => JSON.parse(JSON.stringify(v)),
-    current = () => getData().furniture[selected];
-  function save() {
-    history.push(clone(getData().furniture));
-    if (history.length > 60) history.shift();
+    current = () => getData().furniture[selected],
+    limit = 60;
+  // Undo entries are inverse operations, not whole-array snapshots: adding or
+  // moving one item stores one small record instead of a copy of the model.
+  // Both stacks are capped, so a long session stays bounded in memory.
+  function pushOp(entry) {
+    history.push(entry);
+    if (history.length > limit) history.shift();
     future.length = 0;
   }
-  const { polygon, overlap } = Eco.collisions;
+  const { polygon, overlap } = Eco.collisions,
+    footprintCache = new WeakMap();
+  function footprint(f) {
+    const key = [f.x, f.z, f.w, f.d, f.rotation || 0].join("|");
+    const cached = footprintCache.get(f);
+    if (cached?.key === key) return cached.polygon;
+    const result = polygon(f);
+    footprintCache.set(f, { key, polygon: result });
+    return result;
+  }
+  function scheduleRefresh() {
+    if (refreshPending) return;
+    refreshPending = true;
+    setTimeout(() => {
+      refreshPending = false;
+      refresh();
+    }, 16);
+  }
   function warning(f) {
-    const p = polygon(f),
+    const p = footprint(f),
       d = getData();
     if (p.some((v) => v.x < 0 || v.z < 0 || v.x > d.width || v.z > d.depth))
       return "Предмет выходит за границы квартиры.";
@@ -74,7 +143,7 @@ window.createFurnisher = function ({
           Math.min((f.y || 0) + (f.h || 5), (o.y || 0) + (o.h || 5)) -
             Math.max(f.y || 0, o.y || 0) >
             0.005 &&
-          overlap(p, polygon(o)),
+          overlap(p, footprint(o)),
       )
     )
       return "Пересечение с другой мебелью. Допустимо, например, для стула под столом.";
@@ -92,10 +161,11 @@ window.createFurnisher = function ({
     if (g) {
       g.position.set(f.x, f.y || 0, f.z);
       g.rotation.y = f.rotation || 0;
+      shadowsDirty();
     }
     outline.geometry.dispose();
     outline.geometry = new THREE.BufferGeometry().setFromPoints(
-      polygon(f).map((p) => new THREE.Vector3(p.x, (f.y || 0) + 0.015, p.z)),
+      footprint(f).map((p) => new THREE.Vector3(p.x, (f.y || 0) + 0.015, p.z)),
     );
     const msg = warning(f);
     $("furnishWarning").textContent = msg;
@@ -139,13 +209,7 @@ window.createFurnisher = function ({
   function clearGhost() {
     if (!ghost) return;
     scene.remove(ghost);
-    ghost.traverse((o) => {
-      o.geometry?.dispose();
-      if (o.material)
-        (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) =>
-          m.dispose(),
-        );
-    });
+    Eco.geometry.dispose(ghost);
     ghost = null;
   }
   function cancelPlacement() {
@@ -179,6 +243,7 @@ window.createFurnisher = function ({
       const b = document.createElement("button");
       b.type = "button";
       b.className = "catalog-item";
+      b.dataset.catalogIndex = i;
       b.setAttribute(
         "aria-label",
         f.name + " — " + f.w + " × " + f.d + " × " + f.h + " м",
@@ -226,6 +291,7 @@ window.createFurnisher = function ({
       };
       $("furnishCatalog").appendChild(b);
     });
+    if (active) requestPreviews();
   }
   $("furnishCategory").innerHTML =
     '<option value="all">Весь каталог</option>' +
@@ -255,15 +321,7 @@ window.createFurnisher = function ({
       onStart();
       $("furniture").checked = true;
       setMode("orbit");
-      if (!previews) {
-        try {
-          previews = getPreviews(catalog);
-        } catch (e) {
-          console.warn("Превью недоступны", e);
-          previews = [];
-        }
-        renderCatalog();
-      }
+      requestPreviews();
       $("furnishMessage").textContent =
         "Выберите предмет в каталоге или перетащите существующий в 3D.";
     }
@@ -321,7 +379,6 @@ window.createFurnisher = function ({
         $("furnishMessage").textContent = "Достигнут лимит: 500 предметов.";
         return true;
       }
-      save();
       const f = clone(catalog[pending]);
       delete f.category;
       f.rotation = pendingAngle;
@@ -330,6 +387,7 @@ window.createFurnisher = function ({
       f.z = position.z;
       d.furniture.push(f);
       selected = d.furniture.length - 1;
+      pushOp({ kind: "remove", index: selected, item: clone(f) });
       cancelPlacement();
       syncFurniture();
       refresh();
@@ -375,12 +433,12 @@ window.createFurnisher = function ({
       z = position.z;
     if (f.x === x && f.z === z) return true;
     if (!drag.moved) {
-      save();
+      pushOp({ kind: "patch", index: selected, before: clone(current()) });
       drag.moved = true;
     }
     f.x = x;
     f.z = z;
-    refresh();
+    scheduleRefresh();
     if (position.targetIndex >= 0)
       $("furnishMessage").textContent = "Магнитная привязка. Удерживайте Ctrl для свободного перемещения.";
     else if (drag.magnetHint) $("furnishMessage").textContent = "Свободное перемещение.";
@@ -389,7 +447,7 @@ window.createFurnisher = function ({
   }
   function change(fn) {
     if (!current()) return;
-    save();
+    pushOp({ kind: "patch", index: selected, before: clone(current()) });
     fn(current());
     syncFurniture();
     refresh();
@@ -400,7 +458,7 @@ window.createFurnisher = function ({
     change((f) => (f.rotation = (f.rotation || 0) - Math.PI / 2));
   $("furnishDelete").onclick = () => {
     if (!current()) return;
-    save();
+    pushOp({ kind: "insert", index: selected, item: clone(current()) });
     getData().furniture.splice(selected, 1);
     selected = -1;
     syncFurniture();
@@ -408,13 +466,13 @@ window.createFurnisher = function ({
   };
   $("furnishDuplicate").onclick = () => {
     if (!current() || getData().furniture.length >= 500) return;
-    save();
     const f = clone(current());
     delete f.id;
     f.x += 0.25;
     f.z += 0.25;
     getData().furniture.push(f);
     selected = getData().furniture.length - 1;
+    pushOp({ kind: "remove", index: selected, item: clone(f) });
     syncFurniture();
     refresh();
   };
@@ -450,17 +508,72 @@ window.createFurnisher = function ({
     }
     change((f) => Object.assign(f, v));
   };
-  function restore(from, to) {
-    if (!from.length) return;
-    to.push(clone(getData().furniture));
-    getData().furniture = from.pop();
+  // Undo applies the stored inverse and remembers the state it displaced, so
+  // redo is the mirror of undo without a second snapshot.
+  function perform(entry) {
+    const items = getData().furniture;
+    if (entry.kind === "model") {
+      entry.after = clone(getData());
+      applyModel(entry.before);
+      return true;
+    }
+    const i = entry.index;
+    if (entry.kind === "remove") {
+      if (i < 0 || i >= items.length) return false;
+      entry.item = clone(items[i]);
+      items.splice(i, 1);
+      return true;
+    }
+    if (entry.kind === "insert") {
+      if (i < 0 || i > items.length) return false;
+      items.splice(i, 0, clone(entry.item));
+      return true;
+    }
+    if (entry.kind !== "patch" || i < 0 || i >= items.length) return false;
+    entry.after = clone(items[i]);
+    items[i] = clone(entry.before);
+    return true;
+  }
+  function revert(entry) {
+    const items = getData().furniture;
+    if (entry.kind === "model") {
+      entry.before = clone(getData());
+      applyModel(entry.after);
+      return true;
+    }
+    const i = entry.index;
+    if (entry.kind === "remove") {
+      if (i < 0 || i > items.length) return false;
+      items.splice(i, 0, clone(entry.item));
+      return true;
+    }
+    if (entry.kind === "insert") {
+      if (i < 0 || i >= items.length) return false;
+      items.splice(i, 1);
+      return true;
+    }
+    if (entry.kind !== "patch" || entry.after === undefined) return false;
+    if (i < 0 || i >= items.length) return false;
+    items[i] = clone(entry.after);
+    return true;
+  }
+  function step(stack, other, run) {
+    const entry = stack.pop();
+    if (!entry) return;
+    if (!run(entry)) {
+      $("furnishMessage").textContent =
+        "Отмена невозможна: предмет изменился вне истории.";
+      return;
+    }
+    other.push(entry);
+    if (other.length > limit) other.shift();
     selected = -1;
     cancelPlacement();
     syncFurniture();
     refresh();
   }
-  $("furnishUndo").onclick = () => restore(history, future);
-  $("furnishRedo").onclick = () => restore(future, history);
+  $("furnishUndo").onclick = () => step(history, future, perform);
+  $("furnishRedo").onclick = () => step(future, history, revert);
   $("furnishSave").onclick = () => $("export").onclick();
   $("furnishLoad").onclick = () => $("import").click();
   function key(e) {
@@ -499,8 +612,8 @@ window.createFurnisher = function ({
     up: finishDrag,
     key,
     close: () => toggle(false),
-    reset: () => {
-      history.length = future.length = 0;
+    pushOp,
+    resetSelection: () => {
       selected = -1;
       cancelPlacement();
       drag = null;

@@ -1,19 +1,34 @@
 const fs = require("fs"),
   vm = require("vm"),
-  assert = require("assert");
-const THREE = require("../outputs/eco-retreat-v2/vendor/three.min.js");
+  assert = require("assert"),
+  path = require("path");
+
+// All paths are script-relative to the repo root.
+const SRC = path.resolve(__dirname, "..");
+const THREE = require(path.join(SRC, "vendor/three.min.js"));
+
 let draw,
   latest,
   canvas,
   previewRenders = 0,
   handlers = {},
   nodes = {};
-const ctx2d = new Proxy({}, { get: () => () => {} });
+const gradient = { addColorStop() {} };
+const ctx2d = new Proxy(
+  {},
+  {
+    get: (_t, k) =>
+      k === "createLinearGradient" || k === "createRadialGradient"
+        ? () => gradient
+        : () => {},
+  },
+);
 const el = (id = "") => ({
   id,
   checked: true,
   value: "",
   style: {},
+  dataset: {},
   userData: {},
   classList: { toggle() {}, add() {}, remove() {} },
   addEventListener(n, f) {
@@ -35,6 +50,9 @@ const el = (id = "") => ({
   },
   getContext() {
     return ctx2d;
+  },
+  querySelector(sel) {
+    return sel === "img" ? this.children[0] : null;
   },
   showModal() {},
   close() {},
@@ -85,7 +103,8 @@ const document = {
   createElement: () => el(),
   body: el(),
   querySelector: () => null,
-  querySelectorAll: () => [],
+  querySelectorAll: (sel) =>
+    sel === ".catalog-item" ? (nodes.furnishCatalog?.children ?? []) : [],
   exitPointerLock() {},
 };
 const sandbox = {
@@ -102,40 +121,65 @@ const sandbox = {
   Blob,
   URL,
   setTimeout,
+  clearTimeout,
 };
+// Map-backed localStorage: autosave and restore run headless, and a blocked
+// store is exercised by clearing the map rather than deleting the global.
+const storage = (() => {
+  const map = new Map();
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => {
+      map.set(k, String(v));
+    },
+    removeItem: (k) => {
+      map.delete(k);
+    },
+    clear: () => map.clear(),
+    get: (k) => map.get(k),
+    set: (k, v) => map.set(k, String(v)),
+  };
+})();
+sandbox.localStorage = storage;
 sandbox.window = sandbox;
 vm.createContext(sandbox);
+
+// Read index.html from the repo root to determine which scripts to load.
+const htmlSrc = fs.readFileSync(path.join(SRC, "index.html"), "utf8");
 const scripts = [
-  ...fs
-    .readFileSync("outputs/eco-retreat-v2/index.html", "utf8")
-    .matchAll(/<script src="([^"]+)"><\/script>/g),
+  ...htmlSrc.matchAll(/<script src="([^"]+)"><\/script>/g),
 ].map((m) => m[1]);
+
+// If --bundle is passed, also verify the bundle contains every source.
 const bundleScripts = process.argv.includes("--bundle")
   ? [
-      ...fs
-        .readFileSync("outputs/eco-retreat-v2/Eco-Retreat.html", "utf8")
+      ...fs.readFileSync(path.join(SRC, "Eco-Retreat.html"), "utf8")
         .matchAll(/<script>([\s\S]*?)<\/script>/g),
     ].map((m) => m[1])
   : null;
+
 if (bundleScripts) {
   assert.equal(
     bundleScripts.length,
     scripts.length,
     "Bundle includes every source script",
   );
-  // The local vendor is loaded above; retain the instrumented WebGLRenderer in this test.
+  // The local vendor is loaded above; retain the instrumented WebGLRenderer.
   for (let i = 1; i < bundleScripts.length; i++)
     vm.runInContext(bundleScripts[i], sandbox, {
       filename: "bundle:" + scripts[i],
     });
-} else
+} else {
+  // Load from repo root sources, skipping vendor (already loaded above).
   for (const file of scripts)
     if (!file.startsWith("vendor/"))
       vm.runInContext(
-        fs.readFileSync("outputs/eco-retreat-v2/" + file, "utf8"),
+        fs.readFileSync(path.join(SRC, file), "utf8"),
         sandbox,
         { filename: file },
       );
+}
+
 assert(draw, "Scene initialises");
 draw(16);
 let meshes = 0,
@@ -156,6 +200,7 @@ latest.scene.traverse((o) => {
 assert(meshes > 200);
 assert(visibleInFrustum > 200);
 console.log({ meshes, visibleInFrustum });
+
 const partition = latest.scene.getObjectByName("continuous-walls");
 assert(partition);
 for (let z = 3.4; z < 4.5; z += 0.025) {
@@ -171,6 +216,7 @@ for (let z = 3.4; z < 4.5; z += 0.025) {
   );
 }
 console.log("Shared bedroom wall is continuous in rendered geometry");
+
 nodes.walk.onclick();
 draw(32);
 const start = latest.camera.position.clone();
@@ -190,6 +236,7 @@ assert(
   "Wall collision prevents leaving envelope",
 );
 console.log("Movement and wall collision OK");
+
 nodes.plan.onclick();
 draw(18000);
 assert(latest.camera.isOrthographicCamera);
@@ -205,6 +252,7 @@ assert(
   ) < 1e-8,
 );
 console.log("Plan camera and geometry resizing OK");
+
 draw(18100);
 nodes.drawingOpen.onclick();
 assert.equal(
@@ -216,6 +264,7 @@ assert(
   nodes.drawingCanvas.innerHTML.includes("X: 11.000 м"),
   "Drawing uses resized model",
 );
+
 document.getElementById("tapeSurface").checked = false;
 nodes.tape.onclick();
 function selectPoint(x, z) {
@@ -236,6 +285,7 @@ assert(
   "Floor tape measures 3-4-5 diagonal exactly",
 );
 assert.equal(latest.scene.getObjectByName("floor-tape").children.length, 3);
+
 selectPoint(3, 3);
 assert(
   nodes.tapeResult.textContent.includes("Первая точка"),
@@ -243,6 +293,7 @@ assert(
 );
 nodes.tapeClear.onclick();
 assert.equal(latest.scene.getObjectByName("floor-tape").children.length, 0);
+
 nodes.tapeSurface.checked = true;
 selectPoint(0, 2);
 selectPoint(0, 4);
@@ -258,6 +309,7 @@ console.log(
 
 const modelNow = () => JSON.parse(nodes.json.value);
 const count = modelNow().furniture.length;
+
 nodes.tape.onclick();
 nodes.furnish.onclick();
 draw(18200);
@@ -266,15 +318,9 @@ assert(
   "Editor and tape are mutually exclusive",
 );
 assert(latest.camera.isPerspectiveCamera, "Furnishing opens in 3D");
+
 // Keep legacy exact-coordinate gesture assertions independent of the new magnet.
 document.getElementById("furnishMagnet").checked = false;
-assert.equal(previewRenders, sandbox.furnitureCatalog.length);
-assert(
-  nodes.furnishCatalog.children.every((b) =>
-    b.children[0].src.startsWith("data:image/png"),
-  ),
-  "Every catalog card has preview",
-);
 nodes.furnishTop.onclick();
 draw(18250);
 assert.equal(
@@ -290,9 +336,11 @@ assert.equal(
   "Add catalog item on floor",
 );
 assert.equal(modelNow().furniture.at(-1).w, 2);
+
 nodes.furnishRotateRight.onclick();
 draw(18400);
 assert(Math.abs(modelNow().furniture.at(-1).rotation + Math.PI / 2) < 1e-8);
+
 nodes.furnishW.value = "1.8";
 nodes.furnishD.value = "1.4";
 nodes.furnishH.value = ".8";
@@ -300,6 +348,7 @@ nodes.furnishApply.onclick();
 draw(18500);
 assert.equal(modelNow().furniture.at(-1).d, 1.4, "Editable dimensions");
 assert.equal(modelNow().furniture.at(-1).h, 0.8);
+
 function pointerAt(x, z) {
   const p = new THREE.Vector3(x, 0, z).project(latest.camera);
   return {
@@ -321,6 +370,7 @@ assert(
   Math.abs(modelNow().furniture.at(-1).z - 2.6) < 1e-8,
   "Drag furniture in Z",
 );
+
 nodes.furnishDuplicate.onclick();
 assert.equal(modelNow().furniture.length, count + 2);
 nodes.furnishDelete.onclick();
@@ -329,6 +379,7 @@ nodes.furnishUndo.onclick();
 assert.equal(modelNow().furniture.length, count + 2);
 nodes.furnishRedo.onclick();
 assert.equal(modelNow().furniture.length, count + 1);
+
 nodes.furnishCatalog.children[20].onclick();
 selectPoint(0, 2);
 assert(
@@ -336,10 +387,12 @@ assert(
     nodes.furnishWarning.textContent.includes("стен"),
   "Warn about wall intersection",
 );
+
 nodes.walk.onclick();
 assert(nodes.furnishPanel.hidden, "Walking exits furnishing");
 draw(18700);
 assert.equal(latest.camera.position.y, 1.65);
+
 nodes.furnish.onclick();
 nodes.tape.onclick();
 assert(nodes.furnishPanel.hidden && !nodes.tapePanel.hidden);
@@ -353,6 +406,7 @@ assert.equal(modelNow().furniture.length, beforeCancel);
 console.log(
   "Furniture catalog/add/drag/resize/rotate/duplicate/delete/undo/redo/warnings/mode switching OK",
 );
+
 nodes.furnish3D.onclick();
 draw(18800);
 assert(latest.camera.isPerspectiveCamera);
@@ -373,6 +427,7 @@ assert(
   Math.abs(modelNow().furniture.at(-1).rotation + Math.PI / 2) < 1e-8,
   "Preview rotation carried into placed model",
 );
+
 const cameraBefore = latest.camera.position.clone(),
   itemsBefore = JSON.stringify(modelNow().furniture);
 const from = pointerAt(3, 5),
@@ -390,6 +445,7 @@ assert.equal(
   itemsBefore,
   "Orbit does not move furniture",
 );
+
 nodes.furnishCamera.onclick();
 const prior = latest.camera.position.clone();
 canvas.pointerdown(from);
@@ -451,17 +507,153 @@ assert(Math.abs(joined.x - 5.5) < 1e-8);
 assert(Math.abs(joined.z - 4) < 1e-8, "Cabinet ends align");
 assert.equal(joined.targetIndex, 0);
 assert.equal(snap(snapData, { ...cabinet, x: 5.85 }).targetIndex, -1);
+
 snapData.furniture[0].rotation = Math.PI / 2;
-const rotated = snap(snapData, { ...cabinet, x: 4.08, z: 5.63, rotation: Math.PI / 2 });
+const rotated = snap(
+  snapData,
+  { ...cabinet, x: 4.08, z: 5.63, rotation: Math.PI / 2 },
+);
 assert(Math.abs(rotated.x - 4) < 1e-8 && Math.abs(rotated.z - 5.5) < 1e-8);
+
 snapData.furniture[0].rotation = 0;
 snapData.furniture.push({ type: "wardrobe", x: 5.5, z: 4, w: 0.2, d: 0.6, h: 2 });
 assert.equal(snap(snapData, cabinet).targetIndex, -1, "Blocked snap is rejected");
+
 snapData.furniture = [{ type: "dining", x: 4, z: 4, w: 1.2, d: 0.8, h: 0.75 }];
-const chair = snap(snapData, { type: "diningChair", x: 5.07, z: 4, w: 0.6, d: 0.55, h: 0.9 });
+const chair = snap(
+  snapData,
+  { type: "diningChair", x: 5.07, z: 4, w: 0.6, d: 0.55, h: 0.9 },
+);
 assert.equal(chair.targetIndex, 0);
 assert(Math.abs(chair.x - 4.9) < 1e-8, "Chair meets table edge");
-console.log("Furniture magnet joins cabinets and chairs without crossing obstacles");
+console.log(
+  "Furniture magnet joins cabinets and chairs without crossing obstacles",
+);
+
+// Undo must survive edits made outside the furniture editor: a dimension change
+// rebuilds the whole model, so it is recorded as a model delta, not discarded.
+const layoutBefore = JSON.stringify(modelNow());
+nodes.width.value = "11.5";
+nodes.applyDimensions.onclick();
+draw(19300);
+assert.equal(modelNow().width, 11.5, "Model-level edit applies");
+nodes.furnishUndo.onclick();
+assert.equal(modelNow().width, 11, "Undo survives a model-level edit");
+assert.equal(JSON.stringify(modelNow()), layoutBefore, "Undo restores the whole model");
+nodes.furnishRedo.onclick();
+assert.equal(modelNow().width, 11.5, "Redo replays the model-level edit");
+nodes.furnishUndo.onclick();
+assert.equal(modelNow().width, 11, "Undo again returns the previous model");
+assert.equal(JSON.stringify(modelNow()), layoutBefore, "Model roundtrip is lossless");
+console.log("Undo and redo survive model-level edits");
+
+async function checkLazyPreviews() {
+  for (
+    let k = 0;
+    k < 200 && previewRenders < sandbox.furnitureCatalog.length;
+    k++
+  )
+    await new Promise((r) => setTimeout(r, 0));
+  assert.equal(
+    previewRenders,
+    sandbox.furnitureCatalog.length,
+    "Lazy previews render each catalog item exactly once",
+  );
+  assert(
+    nodes.furnishCatalog.children.every((b) =>
+      b.children[0].src.startsWith("data:image/png"),
+    ),
+    "Every catalog card has preview",
+  );
+  console.log("Lazy per-category previews render into cards exactly once");
+}
+
+async function waitForSaved(after) {
+  const key = sandbox.Eco.autosave.KEY;
+  for (let k = 0; k < 40; k++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = storage.get(key);
+    if (!raw) continue;
+    const stored = JSON.parse(raw);
+    if (stored.savedAt > after && stored.data?.version === 2) return stored;
+  }
+  return null;
+}
+
+async function checkAutosave() {
+  const key = sandbox.Eco.autosave.KEY,
+    last = modelNow().furniture.at(-1),
+    before = JSON.stringify(modelNow());
+  storage.clear();
+  assert.equal(
+    nodes.savedAt.textContent,
+    "Изменения автосохраняются в этом браузере",
+    "Footer starts with the idle notice",
+  );
+
+  // A manual download is a checkpoint too, and its file name is timestamped.
+  nodes.export.onclick();
+  assert(
+    /^Скачан eco-retreat-model-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}\.json$/.test(
+      nodes.error.textContent,
+    ),
+    "Export reports a timestamped file name",
+  );
+  assert(storage.get(key), "Manual export records a checkpoint");
+  assert(
+    /^eco-retreat-model-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}\.json$/.test(
+      sandbox.Eco.autosave.exportName(),
+    ),
+    "Export name format",
+  );
+
+  // An edit is buffered, not written on every gesture; pagehide flushes it, and
+  // Undo still returns the item to its previous rotation.
+  storage.clear();
+  selectPoint(last.x, last.z);
+  nodes.furnishRotateRight.onclick();
+  assert.equal(storage.get(key), undefined, "Autosave waits for the edit burst");
+  nodes.furnishUndo.onclick();
+  assert.equal(JSON.stringify(modelNow()), before, "Undo restores the rotation");
+  handlers.pagehide?.();
+  const flushed = JSON.parse(storage.get(key));
+  assert(
+    flushed?.savedAt > 0 && flushed.data?.version === 2,
+    "pagehide flushes pending changes",
+  );
+  assert(
+    /^Автосохранение · \d{2}:\d{2}$/.test(nodes.savedAt.textContent),
+    "Footer reports the last save time",
+  );
+
+  const loaded = sandbox.Eco.autosave.load();
+  assert(loaded?.model && loaded.savedAt > 0, "Stored model loads back");
+  assert.equal(
+    JSON.stringify(loaded.model.furniture),
+    JSON.stringify(modelNow().furniture),
+    "Furniture survives the autosave roundtrip",
+  );
+
+  storage.set(key, "{не json");
+  assert.equal(sandbox.Eco.autosave.load(), null, "Corrupt autosave is ignored");
+  assert.equal(storage.get(key), undefined, "Corrupt entry is dropped");
+
+  // The debounce timer writes on its own, without a flush. Other checkers share
+  // this sandbox and edit the model concurrently, so only the write itself is
+  // asserted, not the exact snapshot.
+  storage.clear();
+  const since = Date.now();
+  nodes.applyDimensions.onclick();
+  assert.equal(storage.get(key), undefined, "Model-level edit is buffered");
+  assert(await waitForSaved(since), "Debounced autosave stores the model");
+  assert(
+    /^Автосохранение · \d{2}:\d{2}$/.test(nodes.savedAt.textContent),
+    "Footer reports the debounced save time",
+  );
+  console.log(
+    "Autosave debounce, pagehide flush, timestamped export and corrupt-entry recovery OK",
+  );
+}
 
 module.exports = {
   THREE,
@@ -470,5 +662,10 @@ module.exports = {
   draw,
   modelNow,
   selectPoint,
+  storage,
   getScene: () => latest.scene,
+  previewDone: Promise.all([checkLazyPreviews(), checkAutosave()]).catch((e) => {
+    console.error(e);
+    process.exitCode = 1;
+  }),
 };

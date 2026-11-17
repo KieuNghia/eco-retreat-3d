@@ -13,7 +13,10 @@ try {
   console.error(e);
 }
 function start() {
-  let data = Eco.modelState.prepare(makeApartment()),
+  // A stored model from the previous session replaces the default apartment.
+  const restored = Eco.autosave.load(),
+    restoredAt = restored?.savedAt ?? null;
+  let data = restored ? restored.model : Eco.modelState.prepare(makeApartment()),
     mode = "orbit",
     apartment,
     world,
@@ -23,7 +26,7 @@ function start() {
     glass = [],
     drag = null,
     last = performance.now();
-  const { scene, renderer, camera, planCamera, sun } = Eco.createRenderer(data);
+  const { scene, renderer, camera, planCamera, sun, shadowsDirty } = Eco.createRenderer(data);
   const navigation = Eco.createNavigation({
       camera,
       planCamera,
@@ -59,6 +62,26 @@ function start() {
     apartment.syncFurniture(data.furniture);
     updateVisibility();
     updateEditor();
+    queueAutosave();
+  }
+  // Debounced: dragging fires on every pointer move, so only the last change of
+  // a burst is written. pagehide flushes whatever is still pending.
+  let saveTimer = null;
+  function queueAutosave() {
+    if (!Eco.autosave.supported()) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      showSaved(Eco.autosave.save(data));
+    }, 600);
+  }
+  function showSaved(ts) {
+    $("savedAt").textContent =
+      ts ?
+        "Автосохранение · " + Eco.autosave.time(ts)
+        : Eco.autosave.supported() ?
+          "Изменения автосохраняются в этом браузере"
+          : "Автосохранение недоступно — скачайте JSON";
   }
   function updateVisibility() {
     const cut = mode !== "walk" && $("low").checked;
@@ -75,6 +98,7 @@ function start() {
       if (g.userData.hidden) return;
       g.visible = mode !== "plan";
     });
+    shadowsDirty();
   }
   function resize() {
     const rect = $("viewport").getBoundingClientRect(),
@@ -251,6 +275,11 @@ function start() {
     navigation.reset();
     setMode(mode);
   };
+  $("resetLayout").onclick = () => {
+    apply(makeApartment());
+    status.textContent =
+      "Исходная планировка загружена · «Отменить» возвращает вашу расстановку.";
+  };
   for (const id of ["low", "labels", "furniture"])
     $(id).onchange = updateVisibility;
   const referenceViewer = Eco.createReferenceViewer();
@@ -288,16 +317,23 @@ function start() {
       (data.width * data.depth).toFixed(2) +
       " м². Чистая площадь меньше из-за стен. База из беседы: 86,4 м².";
   }
-  function apply(d) {
-    const candidate = Eco.modelState.prepare(d);
+  function apply(d, { record = true } = {}) {
+    const candidate = Eco.modelState.prepare(d),
+      // Snapshot the model that is being replaced: Undo must survive a ceiling
+      // or eye-height change, so this is a model delta, not a wiped stack.
+      before = record ? Eco.modelState.clone(data) : null;
     rebuild(candidate);
-    furnisher.reset();
+    // Only a successful rebuild may enter history, so a bad import cannot
+    // poison Undo.
+    if (record) furnisher.pushOp({ kind: "model", before });
+    furnisher.resetSelection();
     navigation.modelChanged();
     sun.position.set(data.width / 2, 10, -6);
     sun.target.position.set(data.width / 2, 0, data.depth / 2);
     resize();
     setMode(mode);
     $("error").textContent = "Модель загружена.";
+    queueAutosave();
   }
   function reportError(error) {
     $("error").textContent = error.message;
@@ -348,14 +384,18 @@ function start() {
     }
   };
   $("export").onclick = () => {
-    const url = URL.createObjectURL(
+    const name = Eco.autosave.exportName(),
+      url = URL.createObjectURL(
         new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
       ),
       a = document.createElement("a");
     a.href = url;
-    a.download = "eco-retreat-model.json";
+    a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // A manual save is also a checkpoint: record it in the autosave store.
+    showSaved(Eco.autosave.save(data));
+    $("error").textContent = "Скачан " + name;
   };
   $("import").onchange = async (e) => {
     try {
@@ -379,7 +419,10 @@ function start() {
     makeGhost: (f) => Eco.makeFurniture({ ...f, x: 0, z: 0, rotation: 0 }),
     syncFurniture,
     setMode,
+    shadowsDirty,
     onResize: resize,
+    // Undo of a model-level entry rebuilds without recording another entry.
+    applyModel: (d) => apply(d, { record: false }),
     onStart: () => {
       keys.clear();
       document.exitPointerLock?.();
@@ -396,7 +439,17 @@ function start() {
   rebuild();
   resize();
   setMode("orbit");
+  showSaved(restoredAt);
+  if (restored)
+    status.textContent =
+      "Расстановка восстановлена из автосохранения · " +
+      Eco.autosave.time(restoredAt);
   addEventListener("resize", resize);
+  addEventListener("pagehide", () => {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    showSaved(Eco.autosave.save(data));
+  });
   function frame(t) {
     const dt = Math.min((t - last) / 1000, 0.05);
     last = t;

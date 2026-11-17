@@ -643,6 +643,7 @@ aside {
       ><button id="reference">Исходная картинка</button
       ><button id="edit">Размеры и мебель</button
       ><button id="reset">В начало</button
+      ><button id="resetLayout">Исходная планировка</button
       ><label
         ><input type="checkbox" id="labels" checked /> Подписи комнат</label
       ><label><input type="checkbox" id="furniture" checked /> Мебель</label
@@ -656,7 +657,8 @@ aside {
       <strong id="hint"
         >Левая кнопка — вращать · правая или Shift — сдвигать · колесо —
         масштаб</strong
-      ><span>1 единица = 1 м · рост 1,65 м · размеры приблизительные</span>
+      ><span>1 единица = 1 м · рост 1,65 м · размеры приблизительные</span
+      ><span id="savedAt">Изменения автосохраняются в этом браузере</span>
     </footer>
     <div id="touch">
       <button data-key="KeyW">↑</button>
@@ -752,9 +754,9 @@ aside {
         ><button id="furnishLoad">Загрузить JSON</button>
       </div>
       <p>
-        Перед закрытием сохраните JSON. Изменения не сохраняются автоматически.
-        Пересечения подсвечиваются, но не запрещаются. Габариты локальные:
-        поворот меняет их ориентацию на плане.
+        Расстановка сохраняется в этом браузере автоматически и восстанавливается
+        при следующем открытии. Пересечения подсвечиваются, но не запрещаются.
+        Габариты локальные: поворот меняет их ориентацию на плане.
       </p>
     </section>
     <section id="tapePanel" hidden>
@@ -1214,6 +1216,89 @@ Eco.modelState = (() => {
     return candidate;
   }
   return { clone, prepare, ensureIds, validate };
+})();
+</script>
+    <script>"use strict";
+window.Eco = window.Eco || {};
+
+// Autosave of the model into localStorage, keyed by schema version, plus
+// timestamped export names. Blocked, absent or quota-limited storage degrades
+// silently: the editor simply behaves as it did before persistence existed.
+Eco.autosave = (() => {
+  const KEY = "eco-retreat.model.v2";
+  let store = null;
+  try {
+    store = typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    store = null; // e.g. Safari private mode throws on access itself
+  }
+  const pad = (n) => String(n).padStart(2, "0");
+  function stamp(now = Date.now()) {
+    const t = new Date(now);
+    return (
+      t.getFullYear() +
+      "-" +
+      pad(t.getMonth() + 1) +
+      "-" +
+      pad(t.getDate()) +
+      "-" +
+      pad(t.getHours()) +
+      "-" +
+      pad(t.getMinutes())
+    );
+  }
+  function time(ts) {
+    return new Date(ts).toLocaleTimeString("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  return {
+    KEY,
+    supported: () => store !== null,
+    save(data) {
+      if (!store) return null;
+      try {
+        const savedAt = Date.now();
+        store.setItem(KEY, JSON.stringify({ savedAt, data }));
+        return savedAt;
+      } catch {
+        return null; // quota exceeded — keep the session, drop persistence
+      }
+    },
+    load() {
+      if (!store) return null;
+      let raw;
+      try {
+        raw = store.getItem(KEY);
+      } catch {
+        return null;
+      }
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return {
+          model: Eco.modelState.prepare(parsed.data),
+          savedAt: parsed.savedAt,
+        };
+      } catch {
+        // A corrupt entry must never block startup.
+        try {
+          store.removeItem(KEY);
+        } catch {}
+        return null;
+      }
+    },
+    clear() {
+      try {
+        store?.removeItem(KEY);
+      } catch {}
+    },
+    exportName(prefix = "eco-retreat-model") {
+      return prefix + "-" + stamp() + ".json";
+    },
+    time,
+  };
 })();
 </script>
     <script>"use strict";
@@ -3548,6 +3633,8 @@ window.createFurnisher = function ({
   setMode,
   onStart,
   onResize,
+  shadowsDirty,
+  applyModel,
 }) {
   const $ = (id) => document.getElementById(id),
     catalog = window.furnitureCatalog,
@@ -3561,8 +3648,54 @@ window.createFurnisher = function ({
     drag = null,
     ghost = null,
     pendingAngle = 0,
-    previews = null,
-    cameraTool = false;
+    cameraTool = false,
+    refreshPending = false;
+  // Sparse by catalog index: undefined = not rendered yet, false = failed.
+  const previews = [],
+    requested = new Set();
+  let previewsPending = false;
+  function fillPreviews() {
+    document.querySelectorAll(".catalog-item").forEach((button) => {
+      const image = button.querySelector("img"),
+        src = previews[Number(button.dataset.catalogIndex)];
+      if (image && src) {
+        image.src = src;
+        image.hidden = false;
+      }
+    });
+  }
+  function requestPreviews() {
+    if (previewsPending) return;
+    const category = $("furnishCategory").value,
+      missing = [];
+    catalog.forEach((f, i) => {
+      if (
+        previews[i] === undefined &&
+        !requested.has(i) &&
+        (!category || category === "all" || f.category === category)
+      )
+        missing.push(i);
+      });
+    if (!missing.length) return;
+    previewsPending = true;
+    missing.forEach((i) => requested.add(i));
+    Promise.resolve()
+      .then(() => getPreviews(catalog, missing))
+      .then((images) => {
+        for (const { index, src } of images) previews[index] = src;
+      })
+      .catch((e) => {
+        console.warn("Превью недоступны", e);
+        for (const i of missing)
+          if (previews[i] === undefined) previews[i] = false;
+      })
+      .finally(() => {
+        previewsPending = false;
+        fillPreviews();
+        // Category may have changed while a render was in flight.
+        if (active) requestPreviews();
+      });
+  }
   const outline = new THREE.LineLoop(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: 0xe98b24, depthTest: false }),
@@ -3572,15 +3705,36 @@ window.createFurnisher = function ({
   outline.visible = false;
   scene.add(outline);
   const clone = (v) => JSON.parse(JSON.stringify(v)),
-    current = () => getData().furniture[selected];
-  function save() {
-    history.push(clone(getData().furniture));
-    if (history.length > 60) history.shift();
+    current = () => getData().furniture[selected],
+    limit = 60;
+  // Undo entries are inverse operations, not whole-array snapshots: adding or
+  // moving one item stores one small record instead of a copy of the model.
+  // Both stacks are capped, so a long session stays bounded in memory.
+  function pushOp(entry) {
+    history.push(entry);
+    if (history.length > limit) history.shift();
     future.length = 0;
   }
-  const { polygon, overlap } = Eco.collisions;
+  const { polygon, overlap } = Eco.collisions,
+    footprintCache = new WeakMap();
+  function footprint(f) {
+    const key = [f.x, f.z, f.w, f.d, f.rotation || 0].join("|");
+    const cached = footprintCache.get(f);
+    if (cached?.key === key) return cached.polygon;
+    const result = polygon(f);
+    footprintCache.set(f, { key, polygon: result });
+    return result;
+  }
+  function scheduleRefresh() {
+    if (refreshPending) return;
+    refreshPending = true;
+    setTimeout(() => {
+      refreshPending = false;
+      refresh();
+    }, 16);
+  }
   function warning(f) {
-    const p = polygon(f),
+    const p = footprint(f),
       d = getData();
     if (p.some((v) => v.x < 0 || v.z < 0 || v.x > d.width || v.z > d.depth))
       return "Предмет выходит за границы квартиры.";
@@ -3610,7 +3764,7 @@ window.createFurnisher = function ({
           Math.min((f.y || 0) + (f.h || 5), (o.y || 0) + (o.h || 5)) -
             Math.max(f.y || 0, o.y || 0) >
             0.005 &&
-          overlap(p, polygon(o)),
+          overlap(p, footprint(o)),
       )
     )
       return "Пересечение с другой мебелью. Допустимо, например, для стула под столом.";
@@ -3628,10 +3782,11 @@ window.createFurnisher = function ({
     if (g) {
       g.position.set(f.x, f.y || 0, f.z);
       g.rotation.y = f.rotation || 0;
+      shadowsDirty();
     }
     outline.geometry.dispose();
     outline.geometry = new THREE.BufferGeometry().setFromPoints(
-      polygon(f).map((p) => new THREE.Vector3(p.x, (f.y || 0) + 0.015, p.z)),
+      footprint(f).map((p) => new THREE.Vector3(p.x, (f.y || 0) + 0.015, p.z)),
     );
     const msg = warning(f);
     $("furnishWarning").textContent = msg;
@@ -3675,13 +3830,7 @@ window.createFurnisher = function ({
   function clearGhost() {
     if (!ghost) return;
     scene.remove(ghost);
-    ghost.traverse((o) => {
-      o.geometry?.dispose();
-      if (o.material)
-        (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) =>
-          m.dispose(),
-        );
-    });
+    Eco.geometry.dispose(ghost);
     ghost = null;
   }
   function cancelPlacement() {
@@ -3715,6 +3864,7 @@ window.createFurnisher = function ({
       const b = document.createElement("button");
       b.type = "button";
       b.className = "catalog-item";
+      b.dataset.catalogIndex = i;
       b.setAttribute(
         "aria-label",
         f.name + " — " + f.w + " × " + f.d + " × " + f.h + " м",
@@ -3762,6 +3912,7 @@ window.createFurnisher = function ({
       };
       $("furnishCatalog").appendChild(b);
     });
+    if (active) requestPreviews();
   }
   $("furnishCategory").innerHTML =
     '<option value="all">Весь каталог</option>' +
@@ -3791,15 +3942,7 @@ window.createFurnisher = function ({
       onStart();
       $("furniture").checked = true;
       setMode("orbit");
-      if (!previews) {
-        try {
-          previews = getPreviews(catalog);
-        } catch (e) {
-          console.warn("Превью недоступны", e);
-          previews = [];
-        }
-        renderCatalog();
-      }
+      requestPreviews();
       $("furnishMessage").textContent =
         "Выберите предмет в каталоге или перетащите существующий в 3D.";
     }
@@ -3857,7 +4000,6 @@ window.createFurnisher = function ({
         $("furnishMessage").textContent = "Достигнут лимит: 500 предметов.";
         return true;
       }
-      save();
       const f = clone(catalog[pending]);
       delete f.category;
       f.rotation = pendingAngle;
@@ -3866,6 +4008,7 @@ window.createFurnisher = function ({
       f.z = position.z;
       d.furniture.push(f);
       selected = d.furniture.length - 1;
+      pushOp({ kind: "remove", index: selected, item: clone(f) });
       cancelPlacement();
       syncFurniture();
       refresh();
@@ -3911,12 +4054,12 @@ window.createFurnisher = function ({
       z = position.z;
     if (f.x === x && f.z === z) return true;
     if (!drag.moved) {
-      save();
+      pushOp({ kind: "patch", index: selected, before: clone(current()) });
       drag.moved = true;
     }
     f.x = x;
     f.z = z;
-    refresh();
+    scheduleRefresh();
     if (position.targetIndex >= 0)
       $("furnishMessage").textContent = "Магнитная привязка. Удерживайте Ctrl для свободного перемещения.";
     else if (drag.magnetHint) $("furnishMessage").textContent = "Свободное перемещение.";
@@ -3925,7 +4068,7 @@ window.createFurnisher = function ({
   }
   function change(fn) {
     if (!current()) return;
-    save();
+    pushOp({ kind: "patch", index: selected, before: clone(current()) });
     fn(current());
     syncFurniture();
     refresh();
@@ -3936,7 +4079,7 @@ window.createFurnisher = function ({
     change((f) => (f.rotation = (f.rotation || 0) - Math.PI / 2));
   $("furnishDelete").onclick = () => {
     if (!current()) return;
-    save();
+    pushOp({ kind: "insert", index: selected, item: clone(current()) });
     getData().furniture.splice(selected, 1);
     selected = -1;
     syncFurniture();
@@ -3944,13 +4087,13 @@ window.createFurnisher = function ({
   };
   $("furnishDuplicate").onclick = () => {
     if (!current() || getData().furniture.length >= 500) return;
-    save();
     const f = clone(current());
     delete f.id;
     f.x += 0.25;
     f.z += 0.25;
     getData().furniture.push(f);
     selected = getData().furniture.length - 1;
+    pushOp({ kind: "remove", index: selected, item: clone(f) });
     syncFurniture();
     refresh();
   };
@@ -3986,17 +4129,72 @@ window.createFurnisher = function ({
     }
     change((f) => Object.assign(f, v));
   };
-  function restore(from, to) {
-    if (!from.length) return;
-    to.push(clone(getData().furniture));
-    getData().furniture = from.pop();
+  // Undo applies the stored inverse and remembers the state it displaced, so
+  // redo is the mirror of undo without a second snapshot.
+  function perform(entry) {
+    const items = getData().furniture;
+    if (entry.kind === "model") {
+      entry.after = clone(getData());
+      applyModel(entry.before);
+      return true;
+    }
+    const i = entry.index;
+    if (entry.kind === "remove") {
+      if (i < 0 || i >= items.length) return false;
+      entry.item = clone(items[i]);
+      items.splice(i, 1);
+      return true;
+    }
+    if (entry.kind === "insert") {
+      if (i < 0 || i > items.length) return false;
+      items.splice(i, 0, clone(entry.item));
+      return true;
+    }
+    if (entry.kind !== "patch" || i < 0 || i >= items.length) return false;
+    entry.after = clone(items[i]);
+    items[i] = clone(entry.before);
+    return true;
+  }
+  function revert(entry) {
+    const items = getData().furniture;
+    if (entry.kind === "model") {
+      entry.before = clone(getData());
+      applyModel(entry.after);
+      return true;
+    }
+    const i = entry.index;
+    if (entry.kind === "remove") {
+      if (i < 0 || i > items.length) return false;
+      items.splice(i, 0, clone(entry.item));
+      return true;
+    }
+    if (entry.kind === "insert") {
+      if (i < 0 || i >= items.length) return false;
+      items.splice(i, 1);
+      return true;
+    }
+    if (entry.kind !== "patch" || entry.after === undefined) return false;
+    if (i < 0 || i >= items.length) return false;
+    items[i] = clone(entry.after);
+    return true;
+  }
+  function step(stack, other, run) {
+    const entry = stack.pop();
+    if (!entry) return;
+    if (!run(entry)) {
+      $("furnishMessage").textContent =
+        "Отмена невозможна: предмет изменился вне истории.";
+      return;
+    }
+    other.push(entry);
+    if (other.length > limit) other.shift();
     selected = -1;
     cancelPlacement();
     syncFurniture();
     refresh();
   }
-  $("furnishUndo").onclick = () => restore(history, future);
-  $("furnishRedo").onclick = () => restore(future, history);
+  $("furnishUndo").onclick = () => step(history, future, perform);
+  $("furnishRedo").onclick = () => step(future, history, revert);
   $("furnishSave").onclick = () => $("export").onclick();
   $("furnishLoad").onclick = () => $("import").click();
   function key(e) {
@@ -4035,8 +4233,8 @@ window.createFurnisher = function ({
     up: finishDrag,
     key,
     close: () => toggle(false),
-    reset: () => {
-      history.length = future.length = 0;
+    pushOp,
+    resetSelection: () => {
       selected = -1;
       cancelPlacement();
       drag = null;
@@ -4060,7 +4258,10 @@ try {
   console.error(e);
 }
 function start() {
-  let data = Eco.modelState.prepare(makeApartment()),
+  // A stored model from the previous session replaces the default apartment.
+  const restored = Eco.autosave.load(),
+    restoredAt = restored?.savedAt ?? null;
+  let data = restored ? restored.model : Eco.modelState.prepare(makeApartment()),
     mode = "orbit",
     apartment,
     world,
@@ -4070,7 +4271,7 @@ function start() {
     glass = [],
     drag = null,
     last = performance.now();
-  const { scene, renderer, camera, planCamera, sun } = Eco.createRenderer(data);
+  const { scene, renderer, camera, planCamera, sun, shadowsDirty } = Eco.createRenderer(data);
   const navigation = Eco.createNavigation({
       camera,
       planCamera,
@@ -4106,6 +4307,26 @@ function start() {
     apartment.syncFurniture(data.furniture);
     updateVisibility();
     updateEditor();
+    queueAutosave();
+  }
+  // Debounced: dragging fires on every pointer move, so only the last change of
+  // a burst is written. pagehide flushes whatever is still pending.
+  let saveTimer = null;
+  function queueAutosave() {
+    if (!Eco.autosave.supported()) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      showSaved(Eco.autosave.save(data));
+    }, 600);
+  }
+  function showSaved(ts) {
+    $("savedAt").textContent =
+      ts ?
+        "Автосохранение · " + Eco.autosave.time(ts)
+        : Eco.autosave.supported() ?
+          "Изменения автосохраняются в этом браузере"
+          : "Автосохранение недоступно — скачайте JSON";
   }
   function updateVisibility() {
     const cut = mode !== "walk" && $("low").checked;
@@ -4122,6 +4343,7 @@ function start() {
       if (g.userData.hidden) return;
       g.visible = mode !== "plan";
     });
+    shadowsDirty();
   }
   function resize() {
     const rect = $("viewport").getBoundingClientRect(),
@@ -4298,6 +4520,11 @@ function start() {
     navigation.reset();
     setMode(mode);
   };
+  $("resetLayout").onclick = () => {
+    apply(makeApartment());
+    status.textContent =
+      "Исходная планировка загружена · «Отменить» возвращает вашу расстановку.";
+  };
   for (const id of ["low", "labels", "furniture"])
     $(id).onchange = updateVisibility;
   const referenceViewer = Eco.createReferenceViewer();
@@ -4335,16 +4562,23 @@ function start() {
       (data.width * data.depth).toFixed(2) +
       " м². Чистая площадь меньше из-за стен. База из беседы: 86,4 м².";
   }
-  function apply(d) {
-    const candidate = Eco.modelState.prepare(d);
+  function apply(d, { record = true } = {}) {
+    const candidate = Eco.modelState.prepare(d),
+      // Snapshot the model that is being replaced: Undo must survive a ceiling
+      // or eye-height change, so this is a model delta, not a wiped stack.
+      before = record ? Eco.modelState.clone(data) : null;
     rebuild(candidate);
-    furnisher.reset();
+    // Only a successful rebuild may enter history, so a bad import cannot
+    // poison Undo.
+    if (record) furnisher.pushOp({ kind: "model", before });
+    furnisher.resetSelection();
     navigation.modelChanged();
     sun.position.set(data.width / 2, 10, -6);
     sun.target.position.set(data.width / 2, 0, data.depth / 2);
     resize();
     setMode(mode);
     $("error").textContent = "Модель загружена.";
+    queueAutosave();
   }
   function reportError(error) {
     $("error").textContent = error.message;
@@ -4395,14 +4629,18 @@ function start() {
     }
   };
   $("export").onclick = () => {
-    const url = URL.createObjectURL(
+    const name = Eco.autosave.exportName(),
+      url = URL.createObjectURL(
         new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
       ),
       a = document.createElement("a");
     a.href = url;
-    a.download = "eco-retreat-model.json";
+    a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // A manual save is also a checkpoint: record it in the autosave store.
+    showSaved(Eco.autosave.save(data));
+    $("error").textContent = "Скачан " + name;
   };
   $("import").onchange = async (e) => {
     try {
@@ -4426,7 +4664,10 @@ function start() {
     makeGhost: (f) => Eco.makeFurniture({ ...f, x: 0, z: 0, rotation: 0 }),
     syncFurniture,
     setMode,
+    shadowsDirty,
     onResize: resize,
+    // Undo of a model-level entry rebuilds without recording another entry.
+    applyModel: (d) => apply(d, { record: false }),
     onStart: () => {
       keys.clear();
       document.exitPointerLock?.();
@@ -4443,7 +4684,17 @@ function start() {
   rebuild();
   resize();
   setMode("orbit");
+  showSaved(restoredAt);
+  if (restored)
+    status.textContent =
+      "Расстановка восстановлена из автосохранения · " +
+      Eco.autosave.time(restoredAt);
   addEventListener("resize", resize);
+  addEventListener("pagehide", () => {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    showSaved(Eco.autosave.save(data));
+  });
   function frame(t) {
     const dt = Math.min((t - last) / 1000, 0.05);
     last = t;

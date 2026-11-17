@@ -27,6 +27,7 @@
       ><button id="reference">Исходная картинка</button
       ><button id="edit">Размеры и мебель</button
       ><button id="reset">В начало</button
+      ><button id="resetLayout">Исходная планировка</button
       ><label
         ><input type="checkbox" id="labels" checked /> Подписи комнат</label
       ><label><input type="checkbox" id="furniture" checked /> Мебель</label
@@ -40,7 +41,8 @@
       <strong id="hint"
         >Левая кнопка — вращать · правая или Shift — сдвигать · колесо —
         масштаб</strong
-      ><span>1 единица = 1 м · рост 1,65 м · размеры приблизительные</span>
+      ><span>1 единица = 1 м · рост 1,65 м · размеры приблизительные</span
+      ><span id="savedAt">Изменения автосохраняются в этом браузере</span>
     </footer>
     <div id="touch">
       <button data-key="KeyW">↑</button>
@@ -136,9 +138,9 @@
         ><button id="furnishLoad">Загрузить JSON</button>
       </div>
       <p>
-        Перед закрытием сохраните JSON. Изменения не сохраняются автоматически.
-        Пересечения подсвечиваются, но не запрещаются. Габариты локальные:
-        поворот меняет их ориентацию на плане.
+        Расстановка сохраняется в этом браузере автоматически и восстанавливается
+        при следующем открытии. Пересечения подсвечиваются, но не запрещаются.
+        Габариты локальные: поворот меняет их ориентацию на плане.
       </p>
     </section>
     <section id="tapePanel" hidden>
@@ -276,6 +278,7 @@
     <script src="vendor/three.min.js"></script>
     <script src="kitchen-mesh.js"></script>
     <script src="model-state.js"></script>
+    <script src="autosave.js"></script>
     <script src="collisions.js"></script>
     <script src="furniture-snap.js"></script>
     <script src="geometry.js"></script>
