@@ -15,6 +15,7 @@ Eco.makeFurniture = (() => {
     parent.add(object);
     const addGlass = (m) => {
       m.userData.furnitureGlass = true;
+      m.castShadow = false;
     };
     const w = f.w,
       d = f.d,
@@ -388,6 +389,16 @@ Eco.makeFurniture = (() => {
       g.scale.y = f.h / bounds.max.y;
     object.userData.bodyHeight = Number.isFinite(f.h) ? f.h : bounds.max.y;
     decor.position.y = object.userData.bodyHeight;
+    const shapeKey = JSON.stringify([
+      f.type,
+      f.w,
+      f.d,
+      f.h,
+      f.color,
+      f.basinShape,
+    ]);
+    Eco.geometry.mergeBoxes(g, 3, shapeKey);
+    Eco.geometry.mergeBoxes(decor, 3, `${shapeKey}|decor`);
     object.position.set(f.x || 0, f.y || 0, f.z || 0);
     object.rotation.y = f.rotation || 0;
     return object;

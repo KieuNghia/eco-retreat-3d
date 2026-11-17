@@ -84,6 +84,7 @@ Eco.buildApartment = function (data) {
           depthWrite: false,
         }),
       );
+      gl.castShadow = false;
       glass.push(gl);
       for (let j = -len / 2; j <= len / 2 + 0.01; j += len / 2)
         box(
@@ -111,6 +112,7 @@ Eco.buildApartment = function (data) {
             0.035,
             mat("#a3c4ce", { transparent: true, opacity: 0.22 }),
           );
+        panel.castShadow = false;
         glass.push(panel);
       }
     }
@@ -188,6 +190,7 @@ Eco.buildApartment = function (data) {
           transparent: true,
         }),
       );
+    t.colorSpace = THREE.SRGBColorSpace;
     s.position.set(l.x, 0.95, l.z);
     s.scale.set(2.1, 0.33, 1);
     s.renderOrder = 20;

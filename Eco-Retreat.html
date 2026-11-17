@@ -1366,10 +1366,116 @@ Eco.snapFurniture = function (data, moving, excludeIndex = -1) {
     <script>"use strict";
 window.Eco = window.Eco || {};
 Eco.geometry = (() => {
+  // Geometry and materials are shared between rebuilds, so ownership is counted:
+  // every creation claims one use, teardown releases one use per referencing mesh,
+  // and only the last release disposes the resource. Tiny shared primitives are pinned.
+  const counts = new Map(),
+    pinned = new Set(),
+    textureCache = new Map(),
+    materialCache = new Map(),
+    geometryCache = new Map(),
+    mergedGeometryCache = new Map(),
+    mergedGeometryRefs = new Map();
+  const mapSlots = [
+    "map",
+    "alphaMap",
+    "lightMap",
+    "emissiveMap",
+    "roughnessMap",
+    "metalnessMap",
+    "normalMap",
+    "bumpMap",
+    "aoMap",
+  ];
+  function pin(resource) {
+    pinned.add(resource);
+    return resource;
+  }
+  function own(resource) {
+    if (resource && !pinned.has(resource))
+      counts.set(resource, (counts.get(resource) ?? 0) + 1);
+    return resource;
+  }
+  function ownMaterial(material) {
+    if (!material) return material;
+    for (const slot of mapSlots) if (material[slot]) own(material[slot]);
+    return own(material);
+  }
+  function release(resource) {
+    if (!resource || pinned.has(resource)) return;
+    const shared = mergedGeometryRefs.get(resource);
+    if (shared) {
+      if (--shared.refs === 0) {
+        mergedGeometryRefs.delete(resource);
+        mergedGeometryCache.delete(shared.key);
+        resource.dispose?.();
+      }
+      return;
+    }
+    const left = (counts.get(resource) ?? 1) - 1;
+    if (left > 0) {
+      counts.set(resource, left);
+      return;
+    }
+    counts.delete(resource);
+    resource.dispose?.();
+  }
+  function releaseMaterial(material) {
+    if (!material) return;
+    for (const slot of mapSlots) if (material[slot]) release(material[slot]);
+    release(material);
+  }
+  // Thin foils and dust-sized chips only add shadow-map cost, so they stop casting.
+  function solid(w, h, d) {
+    const dimensions = [w, h, d].map(Math.abs);
+    return !(
+      Math.max(...dimensions) < 0.15 ||
+      Math.min(...dimensions) <= 0.02 ||
+      dimensions.filter((n) => n < 0.06).length >= 2
+    );
+  }
   function mat(color, extra = {}) {
-    return new THREE.MeshStandardMaterial({ color, roughness: 0.78, ...extra });
+    // A material is reusable only when it is a plain color plus plain options:
+    // anything holding another resource (a cloned floor texture, for instance) is private.
+    const plain = Object.keys(extra).every((k) => {
+      const v = extra[k];
+      return (
+        v === null ||
+        typeof v === "boolean" ||
+        typeof v === "number" ||
+        typeof v === "string"
+      );
+    });
+    const key = plain
+      ? `${
+          typeof color === "string"
+            ? color
+            : typeof color === "number"
+              ? `0x${color.toString(16)}`
+              : "default"
+        }|${JSON.stringify(
+          Object.keys(extra)
+            .sort()
+            .map((k) => [k, extra[k]]),
+        )}`
+      : null;
+    const make = () =>
+      new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.78,
+        envMapIntensity: 0.35,
+        ...extra,
+      });
+    if (!key) return ownMaterial(make());
+    const hit = materialCache.get(key);
+    if (hit) return hit;
+    const material = pin(make());
+    materialCache.set(key, material);
+    return material;
   }
   function texture(kind) {
+    const hit = textureCache.get(kind);
+    if (hit) return hit;
     const c = document.createElement("canvas");
     c.width = c.height = 512;
     const q = c.getContext("2d");
@@ -1410,51 +1516,160 @@ Eco.geometry = (() => {
     const t = new THREE.CanvasTexture(c);
     t.colorSpace = THREE.SRGBColorSpace;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    return t;
+    // Base maps stay for the page lifetime: floors clone them, and clones are released
+    // with the material that owns them.
+    textureCache.set(kind, t);
+    return pin(t);
   }
+  // One unit box serves every rectangular part: the dimensions move to mesh scale,
+  // so a rebuild never uploads another identical box of vertex data.
+  const unitBox = pin(new THREE.BoxGeometry(1, 1, 1));
+  const unitSphere = pin(new THREE.SphereGeometry(1, 16, 10));
   function box(parent, x, y, z, w, h, d, color, extra = {}) {
     const m = new THREE.Mesh(
-      new THREE.BoxGeometry(w, h, d),
-      typeof color === "string" ? mat(color) : color,
+      unitBox,
+      typeof color === "string" ? mat(color, extra) : ownMaterial(color),
     );
     m.position.set(x, y, z);
-    m.castShadow = true;
+    m.scale.set(w, h, d);
+    m.castShadow = solid(w, h, d);
     m.receiveShadow = true;
+    m.userData.unitBox = true;
+    m.userData.dims = [w, h, d];
     parent.add(m);
     Object.assign(m, extra);
     return m;
   }
   function cylinder(parent, x, y, z, r, h, color, top = r) {
-    const m = new THREE.Mesh(
-      new THREE.CylinderGeometry(top, r, h, 24),
-      mat(color),
-    );
+    const size = `${top}|${r}|${h}`;
+    let geometry = geometryCache.get(size);
+    if (!geometry) {
+      geometry = pin(new THREE.CylinderGeometry(top, r, h, 24));
+      geometryCache.set(size, geometry);
+    }
+    const m = new THREE.Mesh(geometry, mat(color));
     m.position.set(x, y, z);
-    m.castShadow = true;
+    m.castShadow = solid(r, h, r);
     m.receiveShadow = true;
     parent.add(m);
     return m;
   }
   function sphere(parent, x, y, z, rx, ry, rz, color) {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 10), mat(color));
+    const m = new THREE.Mesh(unitSphere, mat(color));
     m.position.set(x, y, z);
     m.scale.set(rx, ry, rz);
-    m.castShadow = true;
+    m.castShadow = solid(rx, ry, rz);
     parent.add(m);
     return m;
   }
-
+  // Fewer draw calls: rectangular parts of one group that share a material become one
+  // baked mesh. Named parts (the app finds them by name), glass parts (the app toggles
+  // them on their own) and private or transparent materials stay as they are. Baking the
+  // child transforms keeps the group bounds, and therefore every measured dimension,
+  // exactly where the individual parts put them.
+  function mergeBoxes(parent, minParts = 3, shapeKey = "") {
+    const groups = new Map();
+    for (const part of [...parent.children])
+      if (
+        part.isMesh &&
+        part.userData.unitBox &&
+        !part.name &&
+        !part.userData.furnitureGlass &&
+        !part.material.transparent
+      ) {
+        const list = groups.get(part.material);
+        if (list) list.push(part);
+        else groups.set(part.material, [part]);
+      }
+    const sourceIndex = unitBox.index;
+    for (const [material, parts] of groups) {
+      if (parts.length < minParts) continue;
+      const srcPos = unitBox.attributes.position,
+        srcNormal = unitBox.attributes.normal,
+        srcUv = unitBox.attributes.uv,
+        vertexCount = srcPos.count;
+      const position = [],
+        normal = [],
+        uv = [],
+        index = [];
+      const point = new THREE.Vector3(),
+        direction = new THREE.Vector3(),
+        transform = new THREE.Matrix4(),
+        turn = new THREE.Matrix3();
+      parts.forEach((part, i) => {
+        part.updateMatrix();
+        transform.copy(part.matrix);
+        turn.getNormalMatrix(transform);
+        for (let k = 0; k < vertexCount; k++) {
+          position.push(
+            ...point.fromBufferAttribute(srcPos, k).applyMatrix4(transform)
+              .toArray(),
+          );
+          normal.push(
+            ...direction
+              .fromBufferAttribute(srcNormal, k)
+              .applyNormalMatrix(turn)
+              .normalize()
+              .toArray(),
+          );
+          uv.push(srcUv.getX(k), srcUv.getY(k));
+        }
+        for (let k = 0; k < sourceIndex.count; k++)
+          index.push(sourceIndex.array[k] + i * vertexCount);
+      });
+      // The merged mesh keeps one reference to the material, so the other parts
+      // hand their claim back here instead of at teardown.
+      for (let extra = 1; extra < parts.length; extra++)
+        releaseMaterial(material);
+      const sharedKey = shapeKey ? `${shapeKey}|${material.uuid}` : null;
+      let geometry = sharedKey ? mergedGeometryCache.get(sharedKey) : null;
+      if (geometry) {
+        mergedGeometryRefs.get(geometry).refs++;
+      } else {
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(position, 3),
+        );
+        geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normal, 3));
+        geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+        geometry.setIndex(index);
+        geometry.computeBoundingSphere();
+        if (sharedKey) {
+          mergedGeometryCache.set(sharedKey, geometry);
+          mergedGeometryRefs.set(geometry, { key: sharedKey, refs: 1 });
+        }
+      }
+      const merged = new THREE.Mesh(geometry, material);
+      merged.castShadow = parts.some((p) => p.castShadow);
+      merged.receiveShadow = parts.some((p) => p.receiveShadow);
+      parts.forEach((part) => {
+        parent.remove(part);
+        part.geometry !== unitBox || part;
+      });
+      parent.add(merged);
+    }
+    return parent;
+  }
   function dispose(root) {
     root.traverse((o) => {
-      o.geometry?.dispose();
+      if (o.geometry) release(o.geometry);
       if (o.material)
-        for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
-          m.map?.dispose();
-          m.dispose();
-        }
+        for (const m of Array.isArray(o.material) ? o.material : [o.material])
+          releaseMaterial(m);
     });
   }
-  return { mat, texture, box, cylinder, sphere, dispose };
+  return {
+    mat,
+    texture,
+    box,
+    cylinder,
+    sphere,
+    mergeBoxes,
+    dispose,
+    release,
+    pin,
+  };
 })();
 </script>
     <script>"use strict";
@@ -1474,6 +1689,7 @@ Eco.makeFurniture = (() => {
     parent.add(object);
     const addGlass = (m) => {
       m.userData.furnitureGlass = true;
+      m.castShadow = false;
     };
     const w = f.w,
       d = f.d,
@@ -1847,6 +2063,16 @@ Eco.makeFurniture = (() => {
       g.scale.y = f.h / bounds.max.y;
     object.userData.bodyHeight = Number.isFinite(f.h) ? f.h : bounds.max.y;
     decor.position.y = object.userData.bodyHeight;
+    const shapeKey = JSON.stringify([
+      f.type,
+      f.w,
+      f.d,
+      f.h,
+      f.color,
+      f.basinShape,
+    ]);
+    Eco.geometry.mergeBoxes(g, 3, shapeKey);
+    Eco.geometry.mergeBoxes(decor, 3, `${shapeKey}|decor`);
     object.position.set(f.x || 0, f.y || 0, f.z || 0);
     object.rotation.y = f.rotation || 0;
     return object;
@@ -1856,13 +2082,16 @@ Eco.makeFurniture = (() => {
 })();
 </script>
     <script>"use strict";
-Eco.furniturePreviews = function (catalog) {
-  const thumbnails = [],
-    r = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false,
-      preserveDrawingBuffer: true,
-    });
+// One shared off-screen WebGL context, created on first use and reused across
+// editor opens and category changes instead of being rebuilt per open.
+let previewContext = null;
+function getPreviewContext() {
+  if (previewContext) return previewContext;
+  const r = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: false,
+    preserveDrawingBuffer: true,
+  });
   r.setSize(260, 180);
   r.setPixelRatio(1);
   r.outputColorSpace = THREE.SRGBColorSpace;
@@ -1875,51 +2104,52 @@ Eco.furniturePreviews = function (catalog) {
   light.position.set(3, 6, 5);
   s.add(light);
   const c = new THREE.OrthographicCamera(-2, 2, 1.4, -1.4, 0.01, 50);
-  try {
-    for (const f of catalog) {
-      const g = Eco.makeFurniture({ ...f, x: 0, z: 0, rotation: 0 }, s, true);
-      try {
-        g.updateMatrixWorld(true);
-        const bounds = new THREE.Box3().setFromObject(g),
-          center = bounds.getCenter(new THREE.Vector3());
-        c.position.copy(center).add(new THREE.Vector3(4, 3.1, 5));
-        c.lookAt(center);
-        c.updateMatrixWorld(true);
-        let mx = 0,
-          my = 0;
-        for (const x of [bounds.min.x, bounds.max.x])
-          for (const y of [bounds.min.y, bounds.max.y])
-            for (const z of [bounds.min.z, bounds.max.z]) {
-              const p = new THREE.Vector3(x, y, z).applyMatrix4(
-                c.matrixWorldInverse,
-              );
-              mx = Math.max(mx, Math.abs(p.x));
-              my = Math.max(my, Math.abs(p.y));
-            }
-        const half = Math.max(my, mx / (260 / 180), 0.2) * 1.18;
-        Object.assign(c, {
-          left: (-half * 260) / 180,
-          right: (half * 260) / 180,
-          top: half,
-          bottom: -half,
-        });
-        c.updateProjectionMatrix();
-        r.render(s, c);
-        thumbnails.push(r.domElement.toDataURL("image/png"));
-      } finally {
-        s.remove(g);
-        g.traverse((o) => {
-          o.geometry?.dispose();
-          if (o.material)
-            (Array.isArray(o.material) ? o.material : [o.material]).forEach(
-              (m) => m.dispose(),
+  previewContext = { r, s, c };
+  return previewContext;
+}
+Eco.furniturePreviews = async function (catalog, wantedIndices) {
+  const wanted = wantedIndices ?? catalog.map((_, i) => i),
+    { r, s, c } = getPreviewContext(),
+    thumbnails = [];
+  for (let k = 0; k < wanted.length; k++) {
+    const i = wanted[k],
+      f = catalog[i],
+      g = Eco.makeFurniture({ ...f, x: 0, z: 0, rotation: 0 }, s, true);
+    try {
+      g.updateMatrixWorld(true);
+      const bounds = new THREE.Box3().setFromObject(g),
+        center = bounds.getCenter(new THREE.Vector3());
+      c.position.copy(center).add(new THREE.Vector3(4, 3.1, 5));
+      c.lookAt(center);
+      c.updateMatrixWorld(true);
+      let mx = 0,
+        my = 0;
+      for (const x of [bounds.min.x, bounds.max.x])
+        for (const y of [bounds.min.y, bounds.max.y])
+          for (const z of [bounds.min.z, bounds.max.z]) {
+            const p = new THREE.Vector3(x, y, z).applyMatrix4(
+              c.matrixWorldInverse,
             );
-        });
-      }
+            mx = Math.max(mx, Math.abs(p.x));
+            my = Math.max(my, Math.abs(p.y));
+          }
+      const half = Math.max(my, mx / (260 / 180), 0.2) * 1.18;
+      Object.assign(c, {
+        left: (-half * 260) / 180,
+        right: (half * 260) / 180,
+        top: half,
+        bottom: -half,
+      });
+      c.updateProjectionMatrix();
+      r.render(s, c);
+      thumbnails.push({ index: i, src: r.domElement.toDataURL("image/png") });
+    } finally {
+      s.remove(g);
+      Eco.geometry.dispose(g);
     }
-  } finally {
-    r.dispose();
-    r.forceContextLoss?.();
+    // Yield regularly so rendering previews does not monopolize the main thread.
+    if (k % 3 === 2 && k < wanted.length - 1)
+      await new Promise((resolve) => setTimeout(resolve, 0));
   }
   return thumbnails;
 };
@@ -2010,6 +2240,7 @@ Eco.buildApartment = function (data) {
           depthWrite: false,
         }),
       );
+      gl.castShadow = false;
       glass.push(gl);
       for (let j = -len / 2; j <= len / 2 + 0.01; j += len / 2)
         box(
@@ -2037,6 +2268,7 @@ Eco.buildApartment = function (data) {
             0.035,
             mat("#a3c4ce", { transparent: true, opacity: 0.22 }),
           );
+        panel.castShadow = false;
         glass.push(panel);
       }
     }
@@ -2114,6 +2346,7 @@ Eco.buildApartment = function (data) {
           transparent: true,
         }),
       );
+    t.colorSpace = THREE.SRGBColorSpace;
     s.position.set(l.x, 0.95, l.z);
     s.scale.set(2.1, 0.33, 1);
     s.renderOrder = 20;
@@ -2221,9 +2454,34 @@ Eco.createRenderer = function (data) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // The room barely changes, so shadows stay stale until something actually moves.
+  renderer.shadowMap.autoUpdate = false;
+  const shadowsDirty = () => (renderer.shadowMap.needsUpdate = true);
+  shadowsDirty();
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.25;
   $("viewport").appendChild(renderer.domElement);
+  // One cheap sky gradient does the ambient work that several bright lights used to do:
+  // materials pick it up with envMapIntensity around a third, so the lights can stay low.
+  const envCanvas = document.createElement("canvas");
+  envCanvas.width = 256;
+  envCanvas.height = 128;
+  const sky = envCanvas.getContext("2d"),
+    gradient = sky.createLinearGradient(0, 0, 0, 128);
+  gradient.addColorStop(0, "#eaf2fa");
+  gradient.addColorStop(0.48, "#f6f3e8");
+  gradient.addColorStop(0.52, "#c9bfa9");
+  gradient.addColorStop(1, "#8b8374");
+  sky.fillStyle = gradient;
+  sky.fillRect(0, 0, 256, 128);
+  sky.fillStyle = "#fffaf0";
+  sky.beginPath();
+  sky.arc(64, 40, 17, 0, 7);
+  sky.fill();
+  const environment = new THREE.CanvasTexture(envCanvas);
+  environment.colorSpace = THREE.SRGBColorSpace;
+  environment.mapping = THREE.EquirectangularReflectionMapping;
+  scene.environment = environment;
   const camera = new THREE.PerspectiveCamera(
       58,
       innerWidth / innerHeight,
@@ -2232,8 +2490,8 @@ Eco.createRenderer = function (data) {
     ),
     planCamera = new THREE.OrthographicCamera(-7, 7, 7, -7, 0.1, 100);
   camera.rotation.order = "YXZ";
-  scene.add(new THREE.HemisphereLight("#f4f8ff", "#9a8265", 1.6));
-  const sun = new THREE.DirectionalLight("#fff4de", 3.1);
+  scene.add(new THREE.HemisphereLight("#f4f8ff", "#9a8265", 1.05));
+  const sun = new THREE.DirectionalLight("#fff4de", 2.2);
   sun.position.set(data.width / 2, 10, -6);
   sun.target.position.set(data.width / 2, 0, data.depth / 2);
   scene.add(sun.target);
@@ -2250,11 +2508,11 @@ Eco.createRenderer = function (data) {
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.03;
   scene.add(sun);
-  const fill = new THREE.DirectionalLight("#dcefff", 0.6);
+  const fill = new THREE.DirectionalLight("#dcefff", 0.35);
   fill.position.set(12, 8, -6);
   scene.add(fill);
 
-  return { scene, renderer, camera, planCamera, sun };
+  return { scene, renderer, camera, planCamera, sun, shadowsDirty };
 };
 </script>
     <script>"use strict";
