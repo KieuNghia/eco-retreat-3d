@@ -1,12 +1,16 @@
 "use strict";
 const fs = require("fs"),
   vm = require("vm"),
-  assert = require("assert");
-const THREE = require("../outputs/eco-retreat-v2/vendor/three.min.js");
+  assert = require("assert"),
+  path = require("path");
+
+// All paths are relative to the repo root.
+const SRC = path.resolve(__dirname, "..");
+const THREE = require(path.join(SRC, "vendor/three.min.js"));
 const sandbox = { THREE, Eco: {} };
 vm.createContext(sandbox);
 vm.runInContext(
-  fs.readFileSync("outputs/eco-retreat-v2/navigation.js", "utf8"),
+  fs.readFileSync(path.join(SRC, "navigation.js"), "utf8"),
   sandbox,
 );
 const data = {

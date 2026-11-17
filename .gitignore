@@ -1,0 +1,9 @@
+# Scratch images (used for planning, not in the app)
+work/*.png
+outputs/
+
+# OS editor caches
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

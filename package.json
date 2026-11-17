@@ -1,0 +1,14 @@
+{
+  "name": "eco-retreat-3d",
+  "version": "0.1.0",
+  "description": "Interactive 3D apartment walkthrough reconstructed from the Eco Retreat T606 floor-plan render.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node work/package-v2.cjs",
+    "test": "node work/run-all.cjs",
+    "check:bundle": "node work/package-v2.cjs --check"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
