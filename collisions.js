@@ -14,6 +14,14 @@ Eco.collisions = (() => {
       z: f.z - (s * x * f.w) / 2 + (c * z * f.d) / 2,
     }));
   }
+  // Axes of an oriented box, used for separating-axis tests.
+  function axes(p) {
+    return p.slice(0, 4).map((v, i) => {
+      const n = p[(i + 1) % 4],
+        length = Math.hypot(n.x - v.x, n.z - v.z) || 1;
+      return { x: -(n.z - v.z) / length, z: (n.x - v.x) / length };
+    });
+  }
   function overlap(a, b) {
     return [a, b].every((p) =>
       p.every((v, i) => {
@@ -29,6 +37,21 @@ Eco.collisions = (() => {
         );
       }),
     );
+  }
+  // How deep two boxes interpenetrate, in metres: 0 when they do not overlap.
+  // This is the distance needed to push one of them back apart.
+  function penetration(a, b) {
+    let depth = Infinity;
+    for (const axis of [...axes(a), ...axes(b)]) {
+      const pa = a.map((q) => q.x * axis.x + q.z * axis.z);
+      const pb = b.map((q) => q.x * axis.x + q.z * axis.z);
+      const depthOnAxis =
+        Math.min(Math.max(...pa), Math.max(...pb)) -
+        Math.max(Math.min(...pa), Math.min(...pb));
+      if (depthOnAxis <= 0) return 0;
+      depth = Math.min(depth, depthOnAxis);
+    }
+    return depth;
   }
   function circleIntersects(x, z, r, b) {
     // Rotate the walker into the object's local coordinates: no oversized world AABB.
@@ -52,5 +75,7 @@ Eco.collisions = (() => {
       rotation: -Math.atan2(w.z2 - w.z1, w.x2 - w.x1),
     };
   }
-  return { polygon, overlap, circleIntersects, wall };
+  // One height default for every consumer: an item without h is a 1 m body.
+  const heightOf = (f) => f.h ?? 1;
+  return { polygon, overlap, penetration, circleIntersects, wall, heightOf };
 })();

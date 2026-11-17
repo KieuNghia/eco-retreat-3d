@@ -493,6 +493,124 @@ assert(
 );
 console.log("Perspective dragging preserves floor position and camera");
 
+// The magnet in the live editor: pressing a cabinet into a partition joins it and
+// squares an angled draft, Ctrl keeps the move free, and undo restores the draft.
+document.getElementById("furnishMagnet").checked = true;
+const layout = modelNow();
+const collide = sandbox.Eco.collisions;
+const cabinets = sandbox.window.furnitureCatalog.filter(
+  (f) => f.type === "wardrobe" || f.type === "cabinet",
+);
+// Find an interior partition whose flush spot is free of other walls and furniture;
+// otherwise every candidate there is blocked and the magnet stays inert.
+const freeAt = (w, item) => {
+  const points = collide.polygon({
+    x: (w.x1 + w.x2) / 2,
+    z: w.z1 + (w.thickness ?? layout.wallThickness) / 2 + item.d / 2,
+    w: item.w,
+    d: item.d,
+  });
+  return (
+    points.every((p) => p.x > 0 && p.z > 0 && p.x < layout.width && p.z < layout.depth) &&
+    !layout.walls.some(
+      (other) =>
+        other !== w &&
+        other.kind !== "sliding" &&
+        collide.overlap(points, collide.polygon(collide.wall(other, layout.wallThickness))),
+    ) &&
+    !layout.furniture.some(
+      (f) => f.type !== "rug" && collide.overlap(points, collide.polygon(f)),
+    )
+  );
+};
+const attempt = layout.walls
+  .filter(
+    (w) => w.kind === "wall" && w.z1 === w.z2 && w.z1 > 0 && w.z1 < layout.depth,
+  )
+  .flatMap((w) => cabinets.map((item) => ({ w, item })))
+  .find(({ w, item }) => freeAt(w, item));
+assert(attempt, "The layout has an interior partition with room to snap against");
+const partitionWall = attempt.w,
+  wardrobe = attempt.item,
+  flushZ = partitionWall.z1 + (partitionWall.thickness ?? layout.wallThickness) / 2 + wardrobe.d / 2,
+  wallCentre = (partitionWall.x1 + partitionWall.x2) / 2;
+nodes.furnishCatalog.children[sandbox.window.furnitureCatalog.indexOf(wardrobe)].onclick();
+draw(19260);
+// Deliberately pressed 0.1 m through the partition face.
+const pressed = pointerAt(wallCentre, flushZ - 0.1);
+canvas.pointermove(pressed);
+canvas.pointerdown(pressed);
+canvas.pointerup(pressed);
+draw(19300);
+const placed = modelNow().furniture.at(-1);
+assert.equal(placed.type, wardrobe.type, "The catalog item was placed");
+assert(Math.abs(placed.z - flushZ) < 1e-6, "Placement joins the partition");
+assert(
+  nodes.furnishMessage.textContent.includes("магнитной привязкой"),
+  "Placement reports the magnet",
+);
+
+const draftAngle = (15 * Math.PI) / 180;
+nodes.furnishAngle.value = "15";
+nodes.furnishApply.onclick();
+draw(19330);
+assert(Math.abs(modelNow().furniture.at(-1).rotation - draftAngle) < 1e-9);
+
+const onItem = (x, z, y = 0.41) => {
+  const p = new THREE.Vector3(x, y, z).project(latest.camera);
+  return {
+    clientX: (p.x + 1) * 720,
+    clientY: (1 - p.y) * 450,
+    button: 0,
+    pointerId: 1,
+  };
+};
+// A drag moves by the difference of two floor hits, so the target is built from the
+// floor point the down ray hit: the item stays on its own line rather than drifting
+// sideways into a neighbouring wall.
+const dragRay = new THREE.Raycaster(),
+  floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const floorOf = (event) => {
+  dragRay.setFromCamera(
+    new THREE.Vector2(event.clientX / 720 - 1, 1 - event.clientY / 450),
+    latest.camera,
+  );
+  return dragRay.ray.intersectPlane(floorPlane, new THREE.Vector3());
+};
+
+// Drag away with Ctrl held: no join, the draft angle survives.
+const awayDown = onItem(placed.x, placed.z),
+  awayFrom = floorOf(awayDown),
+  awayTo = pointerAt(awayFrom.x, awayFrom.z + 0.35);
+canvas.pointerdown(awayDown);
+canvas.pointermove({ ...awayTo, buttons: 1, ctrlKey: true });
+canvas.pointerup(awayTo);
+draw(19360);
+const free = modelNow().furniture.at(-1);
+assert(free.z > flushZ + 0.3, "Ctrl drag leaves the magnet inactive");
+assert(Math.abs(free.rotation - draftAngle) < 1e-9, "Ctrl drag keeps the draft angle");
+
+// Drag back onto the partition: the magnet joins and squares the draft.
+const joinDown = onItem(free.x, free.z),
+  joinFrom = floorOf(joinDown),
+  joinTo = pointerAt(joinFrom.x, joinFrom.z + (flushZ + 0.05 - free.z));
+canvas.pointerdown(joinDown);
+canvas.pointermove({ ...joinTo, buttons: 1 });
+canvas.pointerup(joinTo);
+draw(19390);
+const joinedAgain = modelNow().furniture.at(-1);
+assert(Math.abs(joinedAgain.z - flushZ) < 1e-6, "Dragging into the partition joins it");
+assert.equal(joinedAgain.rotation, 0, "The draft is squared to the partition");
+nodes.furnishUndo.onclick();
+draw(19420);
+const reverted = modelNow().furniture.at(-1);
+assert(
+  Math.abs(reverted.rotation - draftAngle) < 1e-9,
+  "Undo restores the angle the magnet squared away",
+);
+assert(Math.abs(reverted.z - free.z) < 1e-6, "Undo restores the pre-drag position");
+console.log("Magnet joins partitions in the editor and squares angled drafts");
+
 const snap = sandbox.Eco.snapFurniture;
 const snapData = {
   width: 10,
@@ -517,7 +635,21 @@ assert(Math.abs(rotated.x - 4) < 1e-8 && Math.abs(rotated.z - 5.5) < 1e-8);
 
 snapData.furniture[0].rotation = 0;
 snapData.furniture.push({ type: "wardrobe", x: 5.5, z: 4, w: 0.2, d: 0.6, h: 2 });
-assert.equal(snap(snapData, cabinet).targetIndex, -1, "Blocked snap is rejected");
+// A join that would leave the cabinet through the obstacle is refused: the magnet
+// settles flush on one of its faces instead.
+const collisions = sandbox.Eco.collisions;
+const settled = snap(snapData, cabinet);
+assert(
+  !collisions.overlap(
+    collisions.polygon({ ...cabinet, ...settled }),
+    collisions.polygon(snapData.furniture[1]),
+  ),
+  "A snap never lands inside an obstacle",
+);
+assert(
+  Math.abs(Math.abs(settled.z - 4) - 0.6) < 1e-6,
+  "The cabinet ends flush against the obstacle",
+);
 
 snapData.furniture = [{ type: "dining", x: 4, z: 4, w: 1.2, d: 0.8, h: 0.75 }];
 const chair = snap(
@@ -526,6 +658,39 @@ const chair = snap(
 );
 assert.equal(chair.targetIndex, 0);
 assert(Math.abs(chair.x - 4.9) < 1e-8, "Chair meets table edge");
+
+// Walls and room edges are magnet targets too: pressing an item on them joins it
+// instead of refusing, and an angled draft is squared to the face it joined.
+const wallData = {
+  width: 8,
+  depth: 6,
+  wallThickness: 0.16,
+  walls: [{ x1: 0, x2: 8, z1: 1, z2: 1, kind: "wall" }],
+  furniture: [],
+};
+const flush = snap(wallData, { type: "wardrobe", x: 4, z: 1.18, w: 1.8, d: 0.6, h: 2.2 });
+assert(flush.targetIndex < 0, "Wall snap reports a wall target");
+assert(Math.abs(flush.z - 1.38) < 1e-6, "A cabinet sunk into a partition is pushed flush");
+
+const angled = snap(wallData, {
+  type: "wardrobe",
+  x: 4,
+  z: 1.2,
+  w: 1.8,
+  d: 0.6,
+  h: 2.2,
+  rotation: (15 * Math.PI) / 180,
+});
+assert(angled.targetIndex < 0, "A 15° draft still snaps to the partition");
+assert(Math.abs(angled.rotation) < 1e-9, "The draft is squared to the wall axis");
+assert(Math.abs(angled.z - 1.38) < 1e-6);
+
+const openRoom = { width: 8, depth: 6, wallThickness: 0.16, walls: [], furniture: [] };
+const edge = snap(openRoom, { type: "wardrobe", x: 7.6, z: 3, w: 0.6, d: 1.8, h: 2.2 });
+assert(edge.targetIndex < 0, "Room edge reports a boundary target");
+assert(Math.abs(edge.x - 7.7) < 1e-6, "Furniture joins the room edge");
+assert.equal(sandbox.Eco.collisions.heightOf({}), 1, "One shared height default");
+
 console.log(
   "Furniture magnet joins cabinets and chairs without crossing obstacles",
 );

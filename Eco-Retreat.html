@@ -1317,6 +1317,14 @@ Eco.collisions = (() => {
       z: f.z - (s * x * f.w) / 2 + (c * z * f.d) / 2,
     }));
   }
+  // Axes of an oriented box, used for separating-axis tests.
+  function axes(p) {
+    return p.slice(0, 4).map((v, i) => {
+      const n = p[(i + 1) % 4],
+        length = Math.hypot(n.x - v.x, n.z - v.z) || 1;
+      return { x: -(n.z - v.z) / length, z: (n.x - v.x) / length };
+    });
+  }
   function overlap(a, b) {
     return [a, b].every((p) =>
       p.every((v, i) => {
@@ -1332,6 +1340,21 @@ Eco.collisions = (() => {
         );
       }),
     );
+  }
+  // How deep two boxes interpenetrate, in metres: 0 when they do not overlap.
+  // This is the distance needed to push one of them back apart.
+  function penetration(a, b) {
+    let depth = Infinity;
+    for (const axis of [...axes(a), ...axes(b)]) {
+      const pa = a.map((q) => q.x * axis.x + q.z * axis.z);
+      const pb = b.map((q) => q.x * axis.x + q.z * axis.z);
+      const depthOnAxis =
+        Math.min(Math.max(...pa), Math.max(...pb)) -
+        Math.max(Math.min(...pa), Math.min(...pb));
+      if (depthOnAxis <= 0) return 0;
+      depth = Math.min(depth, depthOnAxis);
+    }
+    return depth;
   }
   function circleIntersects(x, z, r, b) {
     // Rotate the walker into the object's local coordinates: no oversized world AABB.
@@ -1355,16 +1378,24 @@ Eco.collisions = (() => {
       rotation: -Math.atan2(w.z2 - w.z1, w.x2 - w.x1),
     };
   }
-  return { polygon, overlap, circleIntersects, wall };
+  // One height default for every consumer: an item without h is a 1 m body.
+  const heightOf = (f) => f.h ?? 1;
+  return { polygon, overlap, penetration, circleIntersects, wall, heightOf };
 })();
 </script>
     <script>"use strict";
 window.Eco = window.Eco || {};
 
 // Magnetic edge alignment for furniture placement. Coordinates remain metres.
+// Solid walls and the room bounds are targets as well, so pressing an item
+// against a wall joins it instead of refusing to snap.
 Eco.snapFurniture = function (data, moving, excludeIndex = -1) {
-  const { polygon, overlap, wall } = Eco.collisions;
+  const { polygon, overlap, penetration, wall, heightOf } = Eco.collisions;
   const threshold = 0.2;
+  // cos ~26°. The editor rotates in 15° steps, so a 0.99 test only ever joined
+  // 90° multiples; 0.9 lets an angled item snap and then be squared to the face.
+  const parallel = 0.9;
+  const quarter = Math.PI / 2;
   const ignored = new Set([
     "rug", "plant", "toilet", "basin", "bath", "wallShower",
     "cornerShower", "shower", "cooktop", "oven", "microwave", "hood",
@@ -1376,18 +1407,32 @@ Eco.snapFurniture = function (data, moving, excludeIndex = -1) {
   ]);
   const original = { x: moving.x, z: moving.z, targetIndex: -1 };
   if (ignored.has(moving.type)) return original;
+
   const project = (points, axis) => {
     const values = points.map((p) => p.x * axis.x + p.z * axis.z);
     return { min: Math.min(...values), max: Math.max(...values) };
   };
   const dot = (a, b) => a.x * b.x + a.z * b.z;
-  const axes = (f) => {
-    const c = Math.cos(f.rotation || 0), s = Math.sin(f.rotation || 0);
+  const axes = (rotation) => {
+    const c = Math.cos(rotation || 0), s = Math.sin(rotation || 0);
     return [{ x: c, z: -s }, { x: s, z: c }];
   };
+  // Squares the mover onto the nearest axis of the target by the smallest angle,
+  // so a 15° draft becomes flush without flipping the item to a stranger angle.
+  const align = (from, to) => {
+    const norm = (a) => ((a % quarter) + quarter) % quarter;
+    let delta = norm(to) - norm(from);
+    if (delta > quarter / 2) delta -= quarter;
+    if (delta < -quarter / 2) delta += quarter;
+    const rotation = from + delta;
+    // Squaring should report the axis exactly, not the residue of the modulo.
+    const axis = Math.round(rotation / quarter) * quarter;
+    return Math.abs(rotation - axis) < 1e-9 ? axis : rotation;
+  };
   const verticalOverlap = (a, b) =>
-    Math.min((a.y || 0) + (a.h || 1), (b.y || 0) + (b.h || 1)) -
+    Math.min((a.y || 0) + heightOf(a), (b.y || 0) + heightOf(b)) -
       Math.max(a.y || 0, b.y || 0) > 0.05;
+
   function clear(candidate) {
     const points = polygon(candidate);
     if (points.some((p) => p.x < 0 || p.z < 0 || p.x > data.width || p.z > data.depth))
@@ -1401,33 +1446,57 @@ Eco.snapFurniture = function (data, moving, excludeIndex = -1) {
       overlap(points, polygon(other)),
     );
   }
-  const movingPoints = polygon(moving), movingAxes = axes(moving);
+
+  // Room edges: furniture along a glazed boundary still wants to be flush. The
+  // boxes sit outside the apartment, so they are never themselves an obstacle.
+  const bounds = [
+    { x: data.width / 2, z: -0.25, w: data.width, d: 0.5, rotation: 0 },
+    { x: data.width / 2, z: data.depth + 0.25, w: data.width, d: 0.5, rotation: 0 },
+    { x: -0.25, z: data.depth / 2, w: 0.5, d: data.depth, rotation: 0 },
+    { x: data.width + 0.25, z: data.depth / 2, w: 0.5, d: data.depth, rotation: 0 },
+  ];
+
   let best = null;
-  for (let i = 0; i < data.furniture.length; i++) {
-    const other = data.furniture[i];
-    if (i === excludeIndex || ignored.has(other.type) || !verticalOverlap(moving, other))
-      continue;
-    const otherPoints = polygon(other), otherAxes = axes(other);
-    for (const base of movingAxes)
+  function consider(target, targetIndex, lateralAllowed) {
+    const targetPoints = polygon(target),
+      targetAxes = axes(target.rotation),
+      targetRotation = target.rotation || 0;
+    const startRotation = moving.rotation || 0,
+      startAxes = axes(startRotation),
+      startPoints = polygon({ ...moving, rotation: startRotation });
+    for (const base of targetAxes)
       for (const sign of [-1, 1]) {
         const normal = { x: base.x * sign, z: base.z * sign };
-        if (Math.max(...otherAxes.map((axis) => Math.abs(dot(normal, axis)))) < 0.99)
+        if (Math.max(...startAxes.map((axis) => Math.abs(dot(normal, axis)))) < parallel)
           continue;
+        const rotation = align(startRotation, targetRotation);
+        const points =
+          rotation === startRotation ? startPoints : polygon({ ...moving, rotation });
         const tangent = { x: -normal.z, z: normal.x };
-        const a = project(movingPoints, normal), b = project(otherPoints, normal);
-        const at = project(movingPoints, tangent), bt = project(otherPoints, tangent);
+        const a = project(points, normal), b = project(targetPoints, normal);
+        const at = project(points, tangent), bt = project(targetPoints, tangent);
+        if (Math.min(at.max, bt.max) - Math.max(at.min, bt.min) < 0.08) continue;
+        // The signed shift that makes the mover flush with this face: positive when
+        // it is short of the face, negative when it is sunk into it. Pushing out by
+        // the overlap depth lands short of flush, which is what made dragging a
+        // cabinet into a partition inert: the candidate still intersected the wall
+        // and was rejected.
         const gap = b.min - a.max;
-        if (gap < -0.08 || gap > threshold ||
-            Math.min(at.max, bt.max) - Math.max(at.min, bt.min) < 0.08)
-          continue;
+        const sunk = penetration(points, targetPoints);
+        if (sunk > threshold + 1e-6) continue;
+        // Only an actual interpenetration may push further than the threshold: that
+        // is the item being pressed into the face, and the shift lands it flush.
+        // A negative gap without overlap means the item is already past the face.
+        if (sunk <= 0 && Math.abs(gap) > threshold + 1e-6) continue;
         let lateral = 0;
-        if (cabinets.has(moving.type) && cabinets.has(other.type)) {
+        if (lateralAllowed && cabinets.has(moving.type) && cabinets.has(target.type)) {
           const choices = [bt.min - at.min, bt.max - at.max];
-          const nearest = choices.reduce((x, y) => Math.abs(x) < Math.abs(y) ? x : y);
+          const nearest = choices.reduce((x, y) => (Math.abs(x) < Math.abs(y) ? x : y));
           if (Math.abs(nearest) <= 0.12) lateral = nearest;
         }
         let candidate = {
           ...moving,
+          rotation,
           x: moving.x + normal.x * gap + tangent.x * lateral,
           z: moving.z + normal.z * gap + tangent.z * lateral,
         };
@@ -1435,17 +1504,41 @@ Eco.snapFurniture = function (data, moving, excludeIndex = -1) {
           lateral = 0;
           candidate = {
             ...moving,
+            rotation,
             x: moving.x + normal.x * gap,
             z: moving.z + normal.z * gap,
           };
         }
         if (!clear(candidate)) continue;
-        const score = Math.hypot(gap, lateral);
+        const score = Math.hypot(gap, lateral) + Math.abs(rotation - startRotation) * 0.5;
         if (!best || score < best.score)
-          best = { x: candidate.x, z: candidate.z, targetIndex: i, score };
+          best = {
+            x: candidate.x,
+            z: candidate.z,
+            rotation,
+            targetIndex,
+            score,
+          };
       }
   }
-  return best ? { x: best.x, z: best.z, targetIndex: best.targetIndex } : original;
+
+  // -1 is reserved for "no snap", so wall and boundary targets are encoded below it.
+  // A glazed segment is a face to sit flush against too; sliding panels and rails
+  // are not, because they are not solid boundaries.
+  data.walls.forEach((w, i) => {
+    if (w.kind !== "wall" && w.kind !== "window") return;
+    consider(wall(w, data.wallThickness), -(i + 2), cabinets.has(moving.type));
+  });
+  bounds.forEach((edge, i) => consider(edge, -(data.walls.length + i + 2), false));
+  data.furniture.forEach((other, i) => {
+    if (i === excludeIndex || ignored.has(other.type) || !verticalOverlap(moving, other))
+      return;
+    consider(other, i, cabinets.has(moving.type) && cabinets.has(other.type));
+  });
+
+  return best
+    ? { x: best.x, z: best.z, rotation: best.rotation, targetIndex: best.targetIndex }
+    : original;
 };
 </script>
     <script>"use strict";
@@ -3715,7 +3808,7 @@ window.createFurnisher = function ({
     if (history.length > limit) history.shift();
     future.length = 0;
   }
-  const { polygon, overlap } = Eco.collisions,
+  const { polygon, overlap, wall, heightOf } = Eco.collisions,
     footprintCache = new WeakMap();
   function footprint(f) {
     const key = [f.x, f.z, f.w, f.d, f.rotation || 0].join("|");
@@ -3739,20 +3832,10 @@ window.createFurnisher = function ({
     if (p.some((v) => v.x < 0 || v.z < 0 || v.x > d.width || v.z > d.depth))
       return "Предмет выходит за границы квартиры.";
     if (
-      d.walls.some((w) => {
-        if (w.kind === "sliding") return false;
-        const t = w.thickness || d.wallThickness;
-        return overlap(
-          p,
-          polygon({
-            x: (w.x1 + w.x2) / 2,
-            z: (w.z1 + w.z2) / 2,
-            w: Math.hypot(w.x2 - w.x1, w.z2 - w.z1) + t,
-            d: t,
-            rotation: -Math.atan2(w.z2 - w.z1, w.x2 - w.x1),
-          }),
-        );
-      })
+      d.walls.some(
+        (w) =>
+          w.kind !== "sliding" && overlap(p, polygon(wall(w, d.wallThickness))),
+      )
     )
       return "Пересечение со стеной или остеклением.";
     if (
@@ -3761,7 +3844,7 @@ window.createFurnisher = function ({
         (o, i) =>
           i !== selected &&
           o.type !== "rug" &&
-          Math.min((f.y || 0) + (f.h || 5), (o.y || 0) + (o.h || 5)) -
+          Math.min((f.y || 0) + heightOf(f), (o.y || 0) + heightOf(o)) -
             Math.max(f.y || 0, o.y || 0) >
             0.005 &&
           overlap(p, footprint(o)),
@@ -3843,7 +3926,7 @@ window.createFurnisher = function ({
   }
   function magneticPosition(f, x, z, excludeIndex, e) {
     if (!$('furnishMagnet').checked || e?.ctrlKey)
-      return { x, z, targetIndex: -1 };
+      return { x, z, rotation: f.rotation || 0, targetIndex: -1 };
     return Eco.snapFurniture(getData(), { ...f, x, z }, excludeIndex);
   }
   function previewAt(p, e) {
@@ -3853,7 +3936,7 @@ window.createFurnisher = function ({
       { ...f, rotation: pendingAngle }, snap(p.x), snap(p.z), -1, e,
     );
     ghost.position.set(position.x, f.y || 0, position.z);
-    ghost.rotation.y = pendingAngle;
+    ghost.rotation.y = position.rotation ?? pendingAngle;
     ghost.visible = true;
   }
   function renderCatalog() {
@@ -4006,13 +4089,14 @@ window.createFurnisher = function ({
       const position = magneticPosition(f, snap(p.x), snap(p.z), -1, e);
       f.x = position.x;
       f.z = position.z;
+      if (position.rotation !== undefined) f.rotation = position.rotation;
       d.furniture.push(f);
       selected = d.furniture.length - 1;
       pushOp({ kind: "remove", index: selected, item: clone(f) });
       cancelPlacement();
       syncFurniture();
       refresh();
-      $("furnishMessage").textContent = position.targetIndex >= 0
+      $("furnishMessage").textContent = position.targetIndex !== -1
         ? "Добавлено с магнитной привязкой. Ctrl отключает магнит при перетаскивании."
         : "Добавлено. Перетаскивайте предмет, меняйте размеры или поворачивайте.";
       return true;
@@ -4031,7 +4115,14 @@ window.createFurnisher = function ({
     selected = hit ? root.children.indexOf(hit) : -1;
     refresh();
     if (current())
-      drag = { x: p.x, z: p.z, fx: current().x, fz: current().z, moved: false };
+      drag = {
+        x: p.x,
+        z: p.z,
+        fx: current().x,
+        fz: current().z,
+        angle: current().rotation || 0,
+        moved: false,
+      };
     return !!current();
   }
   function move(e) {
@@ -4051,19 +4142,26 @@ window.createFurnisher = function ({
         e,
       ),
       x = position.x,
-      z = position.z;
-    if (f.x === x && f.z === z) return true;
+      z = position.z,
+      // A snap squares the item to the face it joined; releasing the magnet puts
+      // back the angle the user had set before the drag started.
+      rotation =
+        position.targetIndex === -1
+          ? drag.angle
+          : (position.rotation ?? drag.angle);
+    if (f.x === x && f.z === z && f.rotation === rotation) return true;
     if (!drag.moved) {
       pushOp({ kind: "patch", index: selected, before: clone(current()) });
       drag.moved = true;
     }
     f.x = x;
     f.z = z;
+    f.rotation = rotation;
     scheduleRefresh();
-    if (position.targetIndex >= 0)
+    if (position.targetIndex !== -1)
       $("furnishMessage").textContent = "Магнитная привязка. Удерживайте Ctrl для свободного перемещения.";
     else if (drag.magnetHint) $("furnishMessage").textContent = "Свободное перемещение.";
-    drag.magnetHint = position.targetIndex >= 0;
+    drag.magnetHint = position.targetIndex !== -1;
     return true;
   }
   function change(fn) {

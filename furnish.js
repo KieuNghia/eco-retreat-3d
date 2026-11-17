@@ -94,7 +94,7 @@ window.createFurnisher = function ({
     if (history.length > limit) history.shift();
     future.length = 0;
   }
-  const { polygon, overlap } = Eco.collisions,
+  const { polygon, overlap, wall, heightOf } = Eco.collisions,
     footprintCache = new WeakMap();
   function footprint(f) {
     const key = [f.x, f.z, f.w, f.d, f.rotation || 0].join("|");
@@ -118,20 +118,10 @@ window.createFurnisher = function ({
     if (p.some((v) => v.x < 0 || v.z < 0 || v.x > d.width || v.z > d.depth))
       return "Предмет выходит за границы квартиры.";
     if (
-      d.walls.some((w) => {
-        if (w.kind === "sliding") return false;
-        const t = w.thickness || d.wallThickness;
-        return overlap(
-          p,
-          polygon({
-            x: (w.x1 + w.x2) / 2,
-            z: (w.z1 + w.z2) / 2,
-            w: Math.hypot(w.x2 - w.x1, w.z2 - w.z1) + t,
-            d: t,
-            rotation: -Math.atan2(w.z2 - w.z1, w.x2 - w.x1),
-          }),
-        );
-      })
+      d.walls.some(
+        (w) =>
+          w.kind !== "sliding" && overlap(p, polygon(wall(w, d.wallThickness))),
+      )
     )
       return "Пересечение со стеной или остеклением.";
     if (
@@ -140,7 +130,7 @@ window.createFurnisher = function ({
         (o, i) =>
           i !== selected &&
           o.type !== "rug" &&
-          Math.min((f.y || 0) + (f.h || 5), (o.y || 0) + (o.h || 5)) -
+          Math.min((f.y || 0) + heightOf(f), (o.y || 0) + heightOf(o)) -
             Math.max(f.y || 0, o.y || 0) >
             0.005 &&
           overlap(p, footprint(o)),
@@ -222,7 +212,7 @@ window.createFurnisher = function ({
   }
   function magneticPosition(f, x, z, excludeIndex, e) {
     if (!$('furnishMagnet').checked || e?.ctrlKey)
-      return { x, z, targetIndex: -1 };
+      return { x, z, rotation: f.rotation || 0, targetIndex: -1 };
     return Eco.snapFurniture(getData(), { ...f, x, z }, excludeIndex);
   }
   function previewAt(p, e) {
@@ -232,7 +222,7 @@ window.createFurnisher = function ({
       { ...f, rotation: pendingAngle }, snap(p.x), snap(p.z), -1, e,
     );
     ghost.position.set(position.x, f.y || 0, position.z);
-    ghost.rotation.y = pendingAngle;
+    ghost.rotation.y = position.rotation ?? pendingAngle;
     ghost.visible = true;
   }
   function renderCatalog() {
@@ -385,13 +375,14 @@ window.createFurnisher = function ({
       const position = magneticPosition(f, snap(p.x), snap(p.z), -1, e);
       f.x = position.x;
       f.z = position.z;
+      if (position.rotation !== undefined) f.rotation = position.rotation;
       d.furniture.push(f);
       selected = d.furniture.length - 1;
       pushOp({ kind: "remove", index: selected, item: clone(f) });
       cancelPlacement();
       syncFurniture();
       refresh();
-      $("furnishMessage").textContent = position.targetIndex >= 0
+      $("furnishMessage").textContent = position.targetIndex !== -1
         ? "Добавлено с магнитной привязкой. Ctrl отключает магнит при перетаскивании."
         : "Добавлено. Перетаскивайте предмет, меняйте размеры или поворачивайте.";
       return true;
@@ -410,7 +401,14 @@ window.createFurnisher = function ({
     selected = hit ? root.children.indexOf(hit) : -1;
     refresh();
     if (current())
-      drag = { x: p.x, z: p.z, fx: current().x, fz: current().z, moved: false };
+      drag = {
+        x: p.x,
+        z: p.z,
+        fx: current().x,
+        fz: current().z,
+        angle: current().rotation || 0,
+        moved: false,
+      };
     return !!current();
   }
   function move(e) {
@@ -430,19 +428,26 @@ window.createFurnisher = function ({
         e,
       ),
       x = position.x,
-      z = position.z;
-    if (f.x === x && f.z === z) return true;
+      z = position.z,
+      // A snap squares the item to the face it joined; releasing the magnet puts
+      // back the angle the user had set before the drag started.
+      rotation =
+        position.targetIndex === -1
+          ? drag.angle
+          : (position.rotation ?? drag.angle);
+    if (f.x === x && f.z === z && f.rotation === rotation) return true;
     if (!drag.moved) {
       pushOp({ kind: "patch", index: selected, before: clone(current()) });
       drag.moved = true;
     }
     f.x = x;
     f.z = z;
+    f.rotation = rotation;
     scheduleRefresh();
-    if (position.targetIndex >= 0)
+    if (position.targetIndex !== -1)
       $("furnishMessage").textContent = "Магнитная привязка. Удерживайте Ctrl для свободного перемещения.";
     else if (drag.magnetHint) $("furnishMessage").textContent = "Свободное перемещение.";
-    drag.magnetHint = position.targetIndex >= 0;
+    drag.magnetHint = position.targetIndex !== -1;
     return true;
   }
   function change(fn) {
