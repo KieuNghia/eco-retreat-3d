@@ -1,0 +1,26 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The project has no dependencies; every supported Node release runs the
+        # same headless checks (engines says >=18).
+        node-version: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      # npm test runs the geometry, editor, camera, kitchen and layout audits and
+      # the bundle drift guard against the committed Eco-Retreat.html; nothing is
+      # installed because there are no dependencies.
+      - run: npm test

@@ -53,26 +53,27 @@ Remaining polish only: ⬜ a visible "restored from autosave" banner that is dis
 1. ⬜ **Walls and openings are not editable.** The only geometry control scales everything proportionally — `applyDimensions` multiplies every wall, floor, label and spawn by `sx/sz` (`app.js:347-366`). The data model already supports per-wall `kind` and `thickness` (`model-state.js:90-94`); what's missing is a plan-view editor for segments: select, drag endpoints, set kind/thickness, validated, with undo. Add a `door` kind (today the enum is `wall/window/sliding/rail`, `model-state.js:91`, and the README states doors are open with no leaves).
 2. ⬜ **JSON version 2 is a hard gate.** `model-state.js:69` rejects anything else with «нужен JSON модели версии 2», and only `model.js` emits version 2. Anyone holding an older export is blocked with no migration path → a version registry with a `v1 → v2` migrator, plus a round-trip test (export → import → export identical).
 3. ⬜ **Rounding drift.** Drag snaps to 0.05 m (`furnish.js:358`) while field write-back rounds to 3 decimals (`furnish.js:206`); alternating those paths accumulates drift. Store canonical rounded values and declare the precision.
-4. ⬜ **Snapping correctness (medium).** `snapFurniture` never considers walls or room bounds for its *candidate* target — `clear()` only validates a candidate against walls and other furniture (`furniture-snap.js:33-43`), so against a wall 5 cm away you get nothing. The axis-parallel test `< 0.99` (`furniture-snap.js:54`) is ±8°, so the editor's 15° angle step (`index.html:108`) never snaps except at 90° multiples. Blocked candidates just backtrack to the original position (`furniture-snap.js:74-82`, `88`). Two default heights disagree: snap uses `h || 1` (`furniture-snap.js:29`), the placement warning uses `h || 5` (`furnish.js:143`). → export `penetration(a,b)` from `collisions.js` (exports today: `polygon/overlap/circleIntersects/wall`, `collisions.js:55`), relax the parallel test to `< 0.9`, align rotation to the target on snap, share one `Eco.collisions.heightOf = (f) => f.h ?? 1`.
+4. ✅ **Snapping correctness (medium).** `snapFurniture` never considered walls or room bounds for its *candidate* target — `clear()` only validated a candidate against walls and other furniture (`furniture-snap.js:33-43`), so against a wall 5 cm away you got nothing. The axis-parallel test `< 0.99` (`furniture-snap.js:54`) was ±8°, so the editor's 15° angle step (`index.html:108`) never snapped except at 90° multiples. Blocked candidates just backtracked to the original position (`furniture-snap.js:74-82`, `88`). Two default heights disagreed: snap used `h || 1` (`furniture-snap.js:29`), the placement warning `h || 5` (`furnish.js:143`). → done: `penetration(a,b)` and `heightOf` are exported from `collisions.js`, walls and room bounds are snap targets, the parallel test is `< 0.9`, rotation is aligned to the target axis, `warning()` uses `wall()`/`heightOf`.
 5. ⬜ **Touch/mobile editing is close to unusable (high).** In the ≤800 px query `#furnishPanel` takes 245 px and `#viewport` is inset by 255 px (`furnish.css:104-123`): on a 390 px phone the canvas is ~135 px wide, and the two-column catalog grid (`furnish.css:127`) sits inside those same 245 px. `aside` is hidden (`furnish.css:116`), the d-pad is walk-only (`style.css:264`) while furnishing forces orbit mode. Zoom exists only via wheel (`navigation.js:115-117`, called from `app.js:232-235`) and `zoom()` only changes `distance`, which the plan branch never reads (`navigation.js:159-162`); `touch-action: none` and no two-pointer handling. Second-finger interference is real: `down()` guards `e.button !== 0` but touch reports button 0 (`furnish.js:360-366`). → bottom-sheet panel (`height:42vh`, single-column catalog), store `pointerId` in `drag` and ignore non-matching events, add a two-pointer pinch feeding `navigation.zoom`, add a `lostpointercapture` fallback, and make plan mode zoomable.
 
 ---
 
-## P4 ⬜ Tests and CI
+## P4 ✅ Tests and CI
 **Effort: M. Builds on the now-working P0 toolchain.**
 
 The five scripts in `work/` are real checks, and `ARCHITECTURE.md` honestly states `WebGLRenderer` and the DOM are replaced and this is not a pixel/GPU test. `check-model.cjs` builds a Proxy-based fake element and replaces `THREE.WebGLRenderer` with an instrumented one; the bundle branch asserts the vendor script is index 0 (`work/check-model.cjs:155-172`) and runs every bundled script through the same sandbox.
 
-Add cases for the seams that are still uncovered:
+The seams that were uncovered are now covered in `work/check-model.cjs`:
 
-- export → import → export round trip (the documented manual acceptance step has no automated equivalent);
-- snapping at 15°/45° and against a wall;
-- undo/redo across add + delete + duplicate, and undo surviving `apply()` (the model-level case is covered; per-item interleaving is not);
-- `blocked()` past a rotated corner (`app.js:135-150`);
-- the 500-item cap and `reference.png` inlining in the bundle;
-- `applyDimensions` preserving clearances (`app.js:347-366`).
+- ✅ export → import → export round trip — the downloaded blob is captured and re-imported, and the byte-identical result is asserted (plus negative-zero coordinates, which `JSON.stringify` normalises to `0`);
+- ✅ snapping at 15° (joins and squares) and at 30°/45° (left free), and against a wall and a room edge;
+- ✅ undo/redo across add + patch + duplicate + delete + rotate interleaved with a model-level resize — six undos rewind, six redos replay;
+- ✅ `blocked()` past a rotated corner: a walker stops on the corner that juts into its lane and passes freely beside it, so neither an undersized nor an oversized box test passes;
+- ✅ the 500-item and 200-wall caps, the 1 MB file guard and the version-2 gate — all refused before the scene is rebuilt, leaving the live model intact;
+- ✅ `reference.png` inlining — the bundle loads nothing outside itself and carries the drawing byte-identical, while `index.html` keeps the separate file;
+- ✅ `applyDimensions` preserving clearances — no wall crossing and no item outside the envelope at 9×7, 12×7, 9×10, 12×10, and an aspect-preserving resize scales existing overlaps exactly.
 
-Then a GitHub Actions job on Ubuntu running `node work/run-all.cjs` — headless, no GPU needed. No `.github/` exists yet. An optional real-browser smoke test must not break the double-click-`file://` promise.
+GitHub Actions runs `npm test` on Ubuntu across Node 18/20/22 (`.github/workflows/test.yml`) — headless, no GPU needed, and it includes the bundle drift guard. An optional real-browser smoke test must not break the double-click-`file://` promise.
 
 ---
 
@@ -127,8 +128,8 @@ Revisit only if a feature genuinely needs a newer release.
 
 | Order | Workstream | Effort | Payoff |
 | --- | --- | --- | --- |
-| 1 | **P3.4** snap fixes (`penetration()`, wall candidates, `< 0.9`, shared `heightOf`) | S | Smallest, most visible correctness win |
-| 2 | **P4** round-trip + snap tests, CI on Linux | M | Safety net before the larger P3 work |
+| 1 | ✅ **P3.4** snap fixes (`penetration()`, wall candidates, `< 0.9`, shared `heightOf`) | S | Smallest, most visible correctness win |
+| 2 | ✅ **P4** round-trip + snap tests, CI on Linux | M | Safety net before the larger P3 work |
 | 3 | **P3.5** touch layout (bottom sheet, pinch, `pointerId`) | M | Editor becomes usable on a phone |
 | 4 | **P3.1/3.2** wall editor + JSON migration | L | Turns a reconstruction into an adjustable model |
 | 5 | **Small PRs** + **P1** follow-ups | S | Polish, no new architecture |

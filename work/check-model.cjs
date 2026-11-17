@@ -151,11 +151,11 @@ const scripts = [
 ].map((m) => m[1]);
 
 // If --bundle is passed, also verify the bundle contains every source.
-const bundleScripts = process.argv.includes("--bundle")
-  ? [
-      ...fs.readFileSync(path.join(SRC, "Eco-Retreat.html"), "utf8")
-        .matchAll(/<script>([\s\S]*?)<\/script>/g),
-    ].map((m) => m[1])
+const bundleHtml = process.argv.includes("--bundle")
+  ? fs.readFileSync(path.join(SRC, "Eco-Retreat.html"), "utf8")
+  : null;
+const bundleScripts = bundleHtml
+  ? [...bundleHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1])
   : null;
 
 if (bundleScripts) {
@@ -163,6 +163,32 @@ if (bundleScripts) {
     bundleScripts.length,
     scripts.length,
     "Bundle includes every source script",
+  );
+  // The standalone file must open by double-click with nothing fetched, so every
+  // asset — including the reference drawing — has to be inside it.
+  assert(
+    !/<script\s+src=|<link\s+rel="stylesheet"|@import\b/i.test(bundleHtml),
+    "The bundle loads nothing outside itself",
+  );
+  assert(
+    bundleHtml.includes('src="data:image/png;base64,'),
+    "Reference drawing is inlined in the bundle",
+  );
+  assert(
+    !bundleHtml.includes('src="reference.png"'),
+    "No dangling reference.png in the bundle",
+  );
+  const inlined = bundleHtml.match(/src="data:image\/png;base64,([A-Za-z0-9+/=]+)"/);
+  assert(
+    inlined &&
+      Buffer.from(inlined[1], "base64").equals(
+        fs.readFileSync(path.join(SRC, "reference.png")),
+      ),
+    "Inlined reference is the byte-identical drawing",
+  );
+  assert(
+    fs.readFileSync(path.join(SRC, "index.html"), "utf8").includes('src="reference.png"'),
+    "The source build still keeps the drawing as a separate file",
   );
   // The local vendor is loaded above; retain the instrumented WebGLRenderer.
   for (let i = 1; i < bundleScripts.length; i++)
@@ -637,12 +663,11 @@ snapData.furniture[0].rotation = 0;
 snapData.furniture.push({ type: "wardrobe", x: 5.5, z: 4, w: 0.2, d: 0.6, h: 2 });
 // A join that would leave the cabinet through the obstacle is refused: the magnet
 // settles flush on one of its faces instead.
-const collisions = sandbox.Eco.collisions;
 const settled = snap(snapData, cabinet);
 assert(
-  !collisions.overlap(
-    collisions.polygon({ ...cabinet, ...settled }),
-    collisions.polygon(snapData.furniture[1]),
+  !collide.overlap(
+    collide.polygon({ ...cabinet, ...settled }),
+    collide.polygon(snapData.furniture[1]),
   ),
   "A snap never lands inside an obstacle",
 );
@@ -689,6 +714,31 @@ const openRoom = { width: 8, depth: 6, wallThickness: 0.16, walls: [], furniture
 const edge = snap(openRoom, { type: "wardrobe", x: 7.6, z: 3, w: 0.6, d: 1.8, h: 2.2 });
 assert(edge.targetIndex < 0, "Room edge reports a boundary target");
 assert(Math.abs(edge.x - 7.7) < 1e-6, "Furniture joins the room edge");
+
+// Only near-parallel faces join (cos ~26°), so the coarser 30° and 45° drafts are
+// left alone rather than squared to the nearest axis. A refused snap reports no
+// rotation at all, and the editor then keeps the angle the draft was given.
+for (const degrees of [30, 45]) {
+  const untouched = snap(openRoom, {
+    type: "wardrobe",
+    x: 7.6,
+    z: 3,
+    w: 0.6,
+    d: 1.8,
+    h: 2.2,
+    rotation: (degrees * Math.PI) / 180,
+  });
+  assert.equal(untouched.targetIndex, -1, `A ${degrees}° draft is not snapped`);
+  assert(
+    Math.abs(untouched.x - 7.6) < 1e-9 && Math.abs(untouched.z - 3) < 1e-9,
+    `A ${degrees}° draft is not moved`,
+  );
+  assert.equal(
+    untouched.rotation,
+    undefined,
+    `A ${degrees}° draft keeps the angle the editor asked for`,
+  );
+}
 assert.equal(sandbox.Eco.collisions.heightOf({}), 1, "One shared height default");
 
 console.log(
@@ -711,6 +761,242 @@ nodes.furnishUndo.onclick();
 assert.equal(modelNow().width, 11, "Undo again returns the previous model");
 assert.equal(JSON.stringify(modelNow()), layoutBefore, "Model roundtrip is lossless");
 console.log("Undo and redo survive model-level edits");
+
+// The checks below change the layout, so they work from the state the previous
+// checks left behind and put it back intact for the async checks.
+const pristine = JSON.stringify(modelNow());
+const uiFields = {
+  width: nodes.width.value,
+  depth: nodes.depth.value,
+  height: nodes.height.value,
+  eye: nodes.eye.value,
+};
+const loadModel = (model) => {
+  nodes.json.value = typeof model === "string" ? model : JSON.stringify(model);
+  nodes.applyJson.onclick();
+  draw(19500);
+};
+const restoreLayout = () => {
+  loadModel(pristine);
+  for (const id of Object.keys(uiFields)) nodes[id].value = uiFields[id];
+  assert.equal(JSON.stringify(modelNow()), pristine, "The layout is restored intact");
+};
+// Wall crossings, envelope containment and item-item interpenetration for a model.
+const audit = (d) => {
+  const walls = d.walls
+    .filter((w) => w.kind !== "sliding")
+    .map((w) => collide.polygon(collide.wall(w, d.wallThickness)));
+  const items = d.furniture.filter((f) => f.type !== "rug");
+  const footprints = items.map((f) => collide.polygon(f));
+  return {
+    crossing: items.flatMap((f, i) =>
+      walls.flatMap(
+        (wallPoints, j) =>
+          collide.penetration(footprints[i], wallPoints) > 0.015 ?
+            [`${f.id}:wall${j}`] :
+            [],
+      ),
+    ),
+    outside: items
+      .filter(
+        (f, i) =>
+          footprints[i].some(
+            (p) =>
+              p.x < -1e-6 ||
+              p.z < -1e-6 ||
+              p.x > d.width + 1e-6 ||
+              p.z > d.depth + 1e-6,
+          ),
+      )
+      .map((f) => f.id),
+    overlaps: footprints.flatMap((a, i) =>
+      footprints.slice(i + 1).flatMap((b, j) => {
+        const depth = collide.penetration(a, b);
+        return depth > 0.015 ?
+          [{ pair: `${items[i].id}+${items[i + j + 1].id}`, depth }] :
+          [];
+      }),
+    ),
+  };
+};
+
+// A burst that mixes furniture edits with a model-level edit must unwind in exact
+// reverse order: six undos return the starting model, six redos replay every step.
+document.getElementById("furnishMagnet").checked = false;
+// The magnet checks above leave the editor open; clicking it again would close it.
+if (nodes.furnishPanel.hidden) nodes.furnish.onclick();
+const burst = modelNow();
+const startCount = burst.furniture.length;
+// Find a catalog item that has a floor spot clear of walls and other furniture, so
+// none of the burst's edits is refused by a collision halfway through.
+const fitsAt = (item, x, z) => {
+  const points = collide.polygon({ x, z, w: item.w, d: item.d, rotation: 0 });
+  return (
+    points.every((p) => p.x > 0 && p.z > 0 && p.x < burst.width && p.z < burst.depth) &&
+    !burst.walls.some(
+      (w) =>
+        w.kind !== "sliding" &&
+        collide.overlap(points, collide.polygon(collide.wall(w, burst.wallThickness))),
+    ) &&
+    !burst.furniture.some(
+      (f) => f.type !== "rug" && collide.overlap(points, collide.polygon(f)),
+    )
+  );
+};
+const spotFor = (item) => {
+  for (let x = 0.4; x <= burst.width - 0.4; x += 0.2)
+    for (let z = 0.4; z <= burst.depth - 0.4; z += 0.2) {
+      // The click is a ray, so only accept a spot the camera can actually reach:
+      // a point behind a wall or off frame never places an item.
+      const hit = floorOf(pointerAt(x, z));
+      if (!hit || Math.abs(hit.x - x) > 0.2 || Math.abs(hit.z - z) > 0.2) continue;
+      if (fitsAt(item, hit.x, hit.z)) return { x: hit.x, z: hit.z };
+    }
+  return null;
+};
+const placement = sandbox.window.furnitureCatalog
+  .map((item, index) => ({ item, index, spot: spotFor(item) }))
+  .find((candidate) => candidate.spot);
+assert(placement, "The layout has a free floor spot for the mixed burst");
+assert.equal(
+  nodes.furnishCatalog.children.length,
+  sandbox.window.furnitureCatalog.length,
+  "The catalog shows every item, so card positions match",
+);
+const spot = placement.spot;
+nodes.furnishCatalog.children[placement.index].onclick();
+selectPoint(spot.x, spot.z);
+nodes.furnishW.value = String(placement.item.w * 0.8);
+nodes.furnishD.value = String(placement.item.d * 0.8);
+nodes.furnishH.value = String(placement.item.h * 0.8);
+nodes.furnishApply.onclick();
+nodes.furnishDuplicate.onclick();
+nodes.furnishDelete.onclick();
+selectPoint(spot.x, spot.z);
+nodes.furnishRotateRight.onclick();
+nodes.width.value = "11.5";
+nodes.depth.value = uiFields.depth;
+nodes.applyDimensions.onclick();
+draw(19560);
+assert.equal(modelNow().furniture.length, startCount + 1, "The burst adds one item");
+assert.equal(modelNow().width, 11.5, "The burst resizes the apartment");
+const burstEnd = JSON.stringify(modelNow());
+assert.notEqual(burstEnd, pristine, "The burst changed the model");
+for (let i = 0; i < 6; i++) nodes.furnishUndo.onclick();
+draw(19600);
+assert.equal(JSON.stringify(modelNow()), pristine, "Six undos rewind the mixed burst");
+assert.equal(modelNow().furniture.length, startCount, "Rewinding removes the added item");
+for (let i = 0; i < 6; i++) nodes.furnishRedo.onclick();
+draw(19640);
+assert.equal(JSON.stringify(modelNow()), burstEnd, "Six redos replay the mixed burst");
+restoreLayout();
+console.log("Interleaved furniture and model edits rewind and replay exactly");
+
+// Resizing must never push furniture through a wall or outside the room, and an
+// aspect-preserving resize must scale existing overlaps exactly, not invent new ones.
+// The audit runs on the shipped apartment rather than the model the editor checks
+// have mutated, so "no crossings" is a real requirement, not a comparison.
+const shipped = sandbox.Eco.modelState.prepare(sandbox.makeApartment());
+loadModel(shipped);
+const reference = audit(shipped);
+assert.deepEqual(reference.crossing, [], "The shipped layout crosses no wall");
+assert.deepEqual(reference.outside, [], "The shipped layout fits the envelope");
+for (const [w, z] of [[9, 7], [12, 7], [9, 10], [12, 10]]) {
+  nodes.width.value = String(w);
+  nodes.depth.value = String(z);
+  nodes.applyDimensions.onclick();
+  draw(19700);
+  const resized = modelNow();
+  assert.equal(resized.width, w, `Resized to ${w} m wide`);
+  assert.equal(resized.depth, z, `Resized to ${z} m deep`);
+  const a = audit(resized);
+  assert.deepEqual(a.crossing, [], `Nothing crosses a wall at ${w}×${z}`);
+  assert.deepEqual(a.outside, [], `Nothing leaves the envelope at ${w}×${z}`);
+}
+for (const k of [1.05, 0.95]) {
+  nodes.width.value = String(shipped.width * k);
+  nodes.depth.value = String(shipped.depth * k);
+  nodes.applyDimensions.onclick();
+  draw(19760);
+  const scaled = audit(modelNow());
+  assert.equal(
+    scaled.overlaps.length,
+    reference.overlaps.length,
+    `Overlap count at k=${k}`,
+  );
+  scaled.overlaps.forEach((hit, i) => {
+    assert.equal(hit.pair, reference.overlaps[i].pair, `Same overlap pair at k=${k}`);
+    assert(
+      Math.abs(hit.depth - reference.overlaps[i].depth * k) < 1e-6,
+      `Overlap scales exactly at k=${k}`,
+    );
+  });
+}
+restoreLayout();
+console.log(
+  "Resizing keeps furniture clear of walls, inside the room and unchanged in overlap",
+);
+
+// A rotated cabinet is collided with its real footprint, not an axis-aligned box: a
+// walker stops on the corner that juts into the lane and passes freely beside it.
+const cornerLane = (x) => ({
+  version: 2,
+  width: 10,
+  depth: 8,
+  ceiling: 2.8,
+  eye: 1.65,
+  wallThickness: 0.16,
+  walls: [
+    { x1: 0, z1: 0, x2: 10, z2: 0, kind: "wall" },
+    { x1: 0, z1: 8, x2: 10, z2: 8, kind: "wall" },
+    { x1: 0, z1: 0, x2: 0, z2: 8, kind: "wall" },
+    { x1: 10, z1: 0, x2: 10, z2: 8, kind: "wall" },
+  ],
+  floors: [],
+  labels: [],
+  furniture: [
+    {
+      id: "corner-wardrobe",
+      type: "wardrobe",
+      x: 5,
+      z: 5,
+      w: 2.4,
+      d: 0.6,
+      h: 2.4,
+      rotation: Math.PI / 4,
+    },
+  ],
+  spawn: { x, y: 1.65, z: 7.2, yaw: 0 },
+});
+const lane = (x) => {
+  loadModel(cornerLane(x));
+  nodes.walk.onclick();
+  assert(nodes.furnishPanel.hidden, "Walking exits furnishing");
+  handlers.keydown({ code: "KeyW", preventDefault() {} });
+  for (let i = 0; i < 250; i++) draw(19820 + i * 16);
+  handlers.keyup({ code: "KeyW" });
+  const position = latest.camera.position;
+  assert(Math.abs(position.x - x) < 1e-6, "Walking straight keeps the lane");
+  assert(
+    !collide.circleIntersects(position.x, position.z, 0.17, cornerLane(x).furniture[0]),
+    "The walker never enters the rotated footprint",
+  );
+  return position;
+};
+// The corner nearest this lane reaches z 6.06. An axis-aligned box of the same
+// cabinet reaches z 5.3, so a walker would pass through the swept footprint.
+const blockedLane = lane(4.4);
+assert(blockedLane.z > 5.9, "The walker stops on the jutting corner");
+assert(blockedLane.z < 6.6, "The walker stops at the corner, not past it");
+// Just outside the corner the same lane stays open, so a walker walks past it.
+const openLane = lane(3.7);
+assert(openLane.z < 4.5, "The lane beside the corner stays open");
+restoreLayout();
+nodes.furnish.onclick();
+assert(latest.camera.isPerspectiveCamera, "Editing returns to the 3D camera");
+console.log(
+  "The walker is collided with rotated furniture, not with an axis-aligned box",
+);
 
 async function checkLazyPreviews() {
   for (
@@ -820,6 +1106,130 @@ async function checkAutosave() {
   );
 }
 
+// The downloaded file has to load back exactly: export → import → export returns the
+// same bytes. The guards for size, item count, wall count and version run before the
+// scene is rebuilt, so a refused file leaves the live model untouched.
+async function checkImportRoundTrip() {
+  const captured = [];
+  const realURL = sandbox.URL;
+  sandbox.URL = {
+    createObjectURL: (blob) => (captured.push(blob), "blob:eco-retreat"),
+    revokeObjectURL() {},
+  };
+  const send = async (text) => {
+    await nodes.import.onchange({
+      target: { files: [{ size: text.length, text: async () => text }], value: "" },
+    });
+    assert.equal(nodes.import.value, "", "The file field is cleared after a load attempt");
+  };
+  try {
+    nodes.export.onclick();
+    assert.equal(captured.length, 1, "Export hands the browser one file");
+    const payload = await captured[0].text();
+    assert.equal(payload, nodes.json.value, "The downloaded file mirrors the JSON field");
+
+    await send(payload);
+    assert.equal(nodes.error.textContent, "Модель загружена.", "The exported file loads back");
+    assert.deepEqual(modelNow(), JSON.parse(payload), "Import reproduces the exported model");
+    nodes.export.onclick();
+    assert.equal(
+      await captured[1].text(),
+      payload,
+      "Export → import → export is byte-identical",
+    );
+
+    // A draft can leave a coordinate as negative zero; it must not survive a round trip.
+    const model = JSON.parse(payload);
+    const negZero = JSON.stringify({
+      ...model,
+      furniture: [
+        ...model.furniture,
+        { id: "neg-zero", type: "chair", x: 0, z: 5, w: 0.5, d: 0.5, h: 0.9, rotation: 0 },
+      ],
+    }).replace('"rotation":0}', '"rotation":-0}');
+    assert(negZero.includes('"rotation":-0'), "The test file really carries negative zero");
+    await send(negZero);
+    assert.equal(nodes.error.textContent, "Модель загружена.", "Negative zero loads without error");
+    assert(
+      modelNow().furniture.every((f) => !Object.is(f.rotation, -0) && !Object.is(f.x, -0)),
+      "Negative zero is not kept in the live model",
+    );
+    nodes.export.onclick();
+    const reexported = await captured[captured.length - 1].text();
+    assert(
+      !/"(?:x|z|w|d|h|rotation)": -0(?![0-9.])/.test(reexported),
+      "Negative zero never comes back out of export",
+    );
+    assert.equal(
+      JSON.parse(reexported).furniture.length,
+      model.furniture.length + 1,
+      "The imported item is exported back",
+    );
+
+    loadModel(pristine);
+    const intact = JSON.stringify(modelNow());
+    await send(JSON.stringify({ ...shipped, note: "x".repeat(1_100_000) }));
+    assert.equal(nodes.error.textContent, "Файл слишком большой.", "A file over 1 MB is refused");
+    assert.equal(JSON.stringify(modelNow()), intact, "A refused file leaves the scene intact");
+
+    await send(
+      JSON.stringify({
+        ...shipped,
+        furniture: [
+          ...shipped.furniture,
+          ...Array.from({ length: 501 - shipped.furniture.length }, (_, i) => ({
+            id: "over-" + i,
+            type: "chair",
+            x: 5,
+            z: 5,
+            w: 0.5,
+            d: 0.5,
+            h: 0.9,
+          })),
+        ],
+      }),
+    );
+    assert(
+      nodes.error.textContent.includes("нужен массив до 500 объектов."),
+      "More than 500 objects are refused",
+    );
+    assert.equal(JSON.stringify(modelNow()), intact, "An over-counted file leaves the scene intact");
+
+    await send(
+      JSON.stringify({
+        ...shipped,
+        walls: Array.from({ length: 201 }, (_, i) => ({
+          x1: 0,
+          z1: 0.2 + i * 0.03,
+          x2: 10,
+          z2: 0.2 + i * 0.03,
+          kind: "wall",
+        })),
+      }),
+    );
+    assert(
+      nodes.error.textContent.includes("допускается до 200 участков стен."),
+      "More than 200 wall segments are refused",
+    );
+    assert.equal(JSON.stringify(modelNow()), intact, "An over-long wall list leaves the scene intact");
+
+    await send(JSON.stringify({ ...shipped, version: 1 }));
+    assert(
+      nodes.error.textContent.includes("нужен JSON модели версии 2."),
+      "A version 1 model is refused rather than half-read",
+    );
+    assert.equal(JSON.stringify(modelNow()), intact, "A version 1 file leaves the scene intact");
+
+    loadModel(pristine);
+    assert.equal(JSON.stringify(modelNow()), pristine, "The model is back after the round trip");
+    console.log(
+      "Export and import roundtrip byte-identical; size, count and version guards refuse bad files",
+    );
+  } finally {
+    sandbox.URL = realURL;
+  }
+}
+
 module.exports = {
   THREE,
   sandbox,
@@ -829,7 +1239,11 @@ module.exports = {
   selectPoint,
   storage,
   getScene: () => latest.scene,
-  previewDone: Promise.all([checkLazyPreviews(), checkAutosave()]).catch((e) => {
+  // The round trip rewrites the model and footer, so it runs after the autosave checks.
+  previewDone: Promise.all([
+    checkLazyPreviews(),
+    checkAutosave().then(checkImportRoundTrip),
+  ]).catch((e) => {
     console.error(e);
     process.exitCode = 1;
   }),
