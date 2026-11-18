@@ -22,6 +22,22 @@ Eco.geometry = (() => {
     "bumpMap",
     "aoMap",
   ];
+  // Grazing-angle floors: a 512² map of planks and grout minified without
+  // anisotropic filtering jumps mip level every frame the camera turns, which reads
+  // as shimmer over the whole floor. The ceiling comes from the renderer because only
+  // it knows the driver's; 8 samples are already enough for these maps.
+  let maxAnisotropy = 1;
+  function setMaxAnisotropy(value) {
+    maxAnisotropy = Math.max(1, Math.min(8, Math.floor(Number(value) || 1)));
+    // Base maps are pinned and floors clone them, so a ceiling that arrives after
+    // the first map still has to reach the cached ones.
+    for (const t of textureCache.values())
+      if (t.anisotropy !== maxAnisotropy) {
+        t.anisotropy = maxAnisotropy;
+        t.needsUpdate = true;
+      }
+    return maxAnisotropy;
+  }
   function pin(resource) {
     pinned.add(resource);
     return resource;
@@ -154,6 +170,7 @@ Eco.geometry = (() => {
     const t = new THREE.CanvasTexture(c);
     t.colorSpace = THREE.SRGBColorSpace;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = maxAnisotropy;
     // Base maps stay for the page lifetime: floors clone them, and clones are released
     // with the material that owns them.
     textureCache.set(kind, t);
@@ -307,5 +324,6 @@ Eco.geometry = (() => {
     dispose,
     release,
     pin,
+    setMaxAnisotropy,
   };
 })();

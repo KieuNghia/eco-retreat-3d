@@ -13,9 +13,28 @@ Eco.createNavigation = function ({ camera, planCamera, getData, isBlocked }) {
     target.set(d.width / 2, 0.2, d.depth / 2);
   }
   center();
+  // The depth buffer is only good for one range, and that range has to match the
+  // mode: 1/0.03 - 1/150 around a 13 m room leaves the last bits to decide whether
+  // coplanar floor patches and grazing-angle textures agree, so the floor shimmers
+  // while the camera turns. Walk keeps a small near plane (the camera is held 0.17 m
+  // clear of walls), orbit needs only enough depth to frame the apartment from up to
+  // 40 m out.
+  const DEPTH = {
+    orbit: { near: 0.12, far: 60 },
+    walk: { near: 0.05, far: 40 },
+    plan: { near: 0.12, far: 60 },
+  };
+  function fitDepth() {
+    const range = DEPTH[mode];
+    if (camera.near === range.near && camera.far === range.far) return;
+    camera.near = range.near;
+    camera.far = range.far;
+    camera.updateProjectionMatrix();
+  }
   function setMode(value) {
     mode = value;
     keys.clear();
+    fitDepth();
     if (mode !== "walk") return;
     const d = getData();
     if (!camera.userData.walkPosition) {
@@ -28,6 +47,7 @@ Eco.createNavigation = function ({ camera, planCamera, getData, isBlocked }) {
   function resize(width, height) {
     const d = getData(),
       a = width / height;
+    fitDepth();
     camera.aspect = a;
     camera.updateProjectionMatrix();
     const size = Math.max(d.depth / 2 + 1.25, (d.width / 2 + 2) / a);

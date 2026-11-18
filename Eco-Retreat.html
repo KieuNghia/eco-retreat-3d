@@ -1565,6 +1565,22 @@ Eco.geometry = (() => {
     "bumpMap",
     "aoMap",
   ];
+  // Grazing-angle floors: a 512² map of planks and grout minified without
+  // anisotropic filtering jumps mip level every frame the camera turns, which reads
+  // as shimmer over the whole floor. The ceiling comes from the renderer because only
+  // it knows the driver's; 8 samples are already enough for these maps.
+  let maxAnisotropy = 1;
+  function setMaxAnisotropy(value) {
+    maxAnisotropy = Math.max(1, Math.min(8, Math.floor(Number(value) || 1)));
+    // Base maps are pinned and floors clone them, so a ceiling that arrives after
+    // the first map still has to reach the cached ones.
+    for (const t of textureCache.values())
+      if (t.anisotropy !== maxAnisotropy) {
+        t.anisotropy = maxAnisotropy;
+        t.needsUpdate = true;
+      }
+    return maxAnisotropy;
+  }
   function pin(resource) {
     pinned.add(resource);
     return resource;
@@ -1697,6 +1713,7 @@ Eco.geometry = (() => {
     const t = new THREE.CanvasTexture(c);
     t.colorSpace = THREE.SRGBColorSpace;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = maxAnisotropy;
     // Base maps stay for the page lifetime: floors clone them, and clones are released
     // with the material that owns them.
     textureCache.set(kind, t);
@@ -1850,6 +1867,7 @@ Eco.geometry = (() => {
     dispose,
     release,
     pin,
+    setMaxAnisotropy,
   };
 })();
 </script>
@@ -2612,8 +2630,29 @@ Eco.buildApartment = function (data) {
       data.depth + 0.15,
       "#b6b2a5",
     );
-    for (const f of data.floors) {
-      const t = tex[f.kind].clone();
+    // Room rectangles in the sketch were drawn across walls and doorways, so several
+    // of them cover the same ground: the corridor into the wardrobe, the wardrobe into
+    // the master bedroom, the bathroom thresholds, the strip past the bedroom-2
+    // partition. Patches at one height are coplanar, and the depth buffer cannot rank
+    // equal depths — the pair swaps every frame, so the floor flickers while the camera
+    // turns. Paint order has to decide instead: a patch that still covers an earlier
+    // one sits 3 mm above it. That is under half a grout line (tiles repeat at 0,65 m)
+    // and half a floorboard, so the seam stays invisible and the furniture only sinks
+    // into the floor rather than floating over it, while 3 mm clears the depth step the
+    // camera resolves even at the far corner of its range.
+    const covering = (a, b) =>
+      Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 1e-4 &&
+      Math.min(a.z + a.d, b.z + b.d) - Math.max(a.z, b.z) > 1e-4;
+    const lift = [];
+    data.floors.forEach((f, i) => {
+      let under = -1;
+      for (let j = 0; j < i; j++)
+        if (covering(f, data.floors[j])) under = Math.max(under, lift[j]);
+      lift.push(under + 1);
+    });
+    for (let i = 0; i < data.floors.length; i++) {
+      const f = data.floors[i],
+        t = tex[f.kind].clone();
       t.needsUpdate = true;
       t.repeat.set(
         f.w / (f.kind === "wood" ? 1.8 : 0.65),
@@ -2622,7 +2661,7 @@ Eco.buildApartment = function (data) {
       box(
         world,
         f.x + f.w / 2,
-        -0.008,
+        -0.008 + lift[i] * 0.003,
         f.z + f.d / 2,
         f.w,
         0.025,
@@ -2665,6 +2704,11 @@ Eco.createRenderer = function (data) {
   renderer.shadowMap.autoUpdate = false;
   const shadowsDirty = () => (renderer.shadowMap.needsUpdate = true);
   shadowsDirty();
+  // Only the renderer knows the driver's anisotropy ceiling, and geometry.js owns
+  // the floor maps, so the ceiling crosses here at build time.
+  Eco.geometry.setMaxAnisotropy(
+    renderer.capabilities?.getMaxAnisotropy?.() ?? 1,
+  );
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.25;
   $("viewport").appendChild(renderer.domElement);
@@ -2690,11 +2734,15 @@ Eco.createRenderer = function (data) {
   sky.arc(64, 40, 17, 0, 7);
   sky.fill();
   scene.environment = prefilterEnvironment(renderer, envCanvas);
+  // Depth precision is the whole point of these numbers: a 0.03 m near plane under
+  // a 150 m far plane spends the buffer on the empty space around a 13 m apartment,
+  // and the bits left over decide whether two coplanar floor patches agree. navigation
+  // re-fits the range per mode; this is the range the orbit view starts with.
   const camera = new THREE.PerspectiveCamera(
       58,
       innerWidth / innerHeight,
-      0.03,
-      150,
+      0.12,
+      60,
     ),
     planCamera = new THREE.OrthographicCamera(-7, 7, 7, -7, 0.1, 100);
   camera.rotation.order = "YXZ";
@@ -2763,9 +2811,28 @@ Eco.createNavigation = function ({ camera, planCamera, getData, isBlocked }) {
     target.set(d.width / 2, 0.2, d.depth / 2);
   }
   center();
+  // The depth buffer is only good for one range, and that range has to match the
+  // mode: 1/0.03 - 1/150 around a 13 m room leaves the last bits to decide whether
+  // coplanar floor patches and grazing-angle textures agree, so the floor shimmers
+  // while the camera turns. Walk keeps a small near plane (the camera is held 0.17 m
+  // clear of walls), orbit needs only enough depth to frame the apartment from up to
+  // 40 m out.
+  const DEPTH = {
+    orbit: { near: 0.12, far: 60 },
+    walk: { near: 0.05, far: 40 },
+    plan: { near: 0.12, far: 60 },
+  };
+  function fitDepth() {
+    const range = DEPTH[mode];
+    if (camera.near === range.near && camera.far === range.far) return;
+    camera.near = range.near;
+    camera.far = range.far;
+    camera.updateProjectionMatrix();
+  }
   function setMode(value) {
     mode = value;
     keys.clear();
+    fitDepth();
     if (mode !== "walk") return;
     const d = getData();
     if (!camera.userData.walkPosition) {
@@ -2778,6 +2845,7 @@ Eco.createNavigation = function ({ camera, planCamera, getData, isBlocked }) {
   function resize(width, height) {
     const d = getData(),
       a = width / height;
+    fitDepth();
     camera.aspect = a;
     camera.updateProjectionMatrix();
     const size = Math.max(d.depth / 2 + 1.25, (d.width / 2 + 2) / a);

@@ -249,8 +249,29 @@ Eco.buildApartment = function (data) {
       data.depth + 0.15,
       "#b6b2a5",
     );
-    for (const f of data.floors) {
-      const t = tex[f.kind].clone();
+    // Room rectangles in the sketch were drawn across walls and doorways, so several
+    // of them cover the same ground: the corridor into the wardrobe, the wardrobe into
+    // the master bedroom, the bathroom thresholds, the strip past the bedroom-2
+    // partition. Patches at one height are coplanar, and the depth buffer cannot rank
+    // equal depths — the pair swaps every frame, so the floor flickers while the camera
+    // turns. Paint order has to decide instead: a patch that still covers an earlier
+    // one sits 3 mm above it. That is under half a grout line (tiles repeat at 0,65 m)
+    // and half a floorboard, so the seam stays invisible and the furniture only sinks
+    // into the floor rather than floating over it, while 3 mm clears the depth step the
+    // camera resolves even at the far corner of its range.
+    const covering = (a, b) =>
+      Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 1e-4 &&
+      Math.min(a.z + a.d, b.z + b.d) - Math.max(a.z, b.z) > 1e-4;
+    const lift = [];
+    data.floors.forEach((f, i) => {
+      let under = -1;
+      for (let j = 0; j < i; j++)
+        if (covering(f, data.floors[j])) under = Math.max(under, lift[j]);
+      lift.push(under + 1);
+    });
+    for (let i = 0; i < data.floors.length; i++) {
+      const f = data.floors[i],
+        t = tex[f.kind].clone();
       t.needsUpdate = true;
       t.repeat.set(
         f.w / (f.kind === "wood" ? 1.8 : 0.65),
@@ -259,7 +280,7 @@ Eco.buildApartment = function (data) {
       box(
         world,
         f.x + f.w / 2,
-        -0.008,
+        -0.008 + lift[i] * 0.003,
         f.z + f.d / 2,
         f.w,
         0.025,

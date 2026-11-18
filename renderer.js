@@ -13,6 +13,11 @@ Eco.createRenderer = function (data) {
   renderer.shadowMap.autoUpdate = false;
   const shadowsDirty = () => (renderer.shadowMap.needsUpdate = true);
   shadowsDirty();
+  // Only the renderer knows the driver's anisotropy ceiling, and geometry.js owns
+  // the floor maps, so the ceiling crosses here at build time.
+  Eco.geometry.setMaxAnisotropy(
+    renderer.capabilities?.getMaxAnisotropy?.() ?? 1,
+  );
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.25;
   $("viewport").appendChild(renderer.domElement);
@@ -38,11 +43,15 @@ Eco.createRenderer = function (data) {
   sky.arc(64, 40, 17, 0, 7);
   sky.fill();
   scene.environment = prefilterEnvironment(renderer, envCanvas);
+  // Depth precision is the whole point of these numbers: a 0.03 m near plane under
+  // a 150 m far plane spends the buffer on the empty space around a 13 m apartment,
+  // and the bits left over decide whether two coplanar floor patches agree. navigation
+  // re-fits the range per mode; this is the range the orbit view starts with.
   const camera = new THREE.PerspectiveCamera(
       58,
       innerWidth / innerHeight,
-      0.03,
-      150,
+      0.12,
+      60,
     ),
     planCamera = new THREE.OrthographicCamera(-7, 7, 7, -7, 0.1, 100);
   camera.rotation.order = "YXZ";

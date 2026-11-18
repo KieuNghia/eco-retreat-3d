@@ -10,6 +10,7 @@ const checks = [
   "work/check-model.cjs --bundle",
   "work/check-refactor.cjs",
   "work/check-camera.cjs",
+  "work/check-floor-depth.cjs",
   "work/check-kitchen.cjs",
   "work/audit-layout.cjs",
   "work/audit-draw-calls.cjs",

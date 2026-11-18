@@ -26,7 +26,7 @@ jobs:
       # so a leg can never claim an engine it never ran.
       - name: Assert the Node leg
         run: node -e 'const want = process.argv[1], got = process.version; if (got.replace(/^v/, "").split(".")[0] != want) { console.error("leg " + want + " resolved to " + got); process.exit(1); } console.log("engine " + got);' '${{ matrix.node-version }}'
-      # npm test runs the geometry, editor, camera, kitchen and layout audits, the
+      # npm test runs the geometry, editor, camera, floor-depth, kitchen and layout audits, the
       # draw-call and shadow audits and the bundle drift guard against the
       # committed Eco-Retreat.html; nothing is installed because there are no
       # dependencies.
