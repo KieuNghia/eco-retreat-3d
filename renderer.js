@@ -17,7 +17,11 @@ Eco.createRenderer = function (data) {
   renderer.toneMappingExposure = 1.25;
   $("viewport").appendChild(renderer.domElement);
   // One cheap sky gradient does the ambient work that several bright lights used to do:
-  // materials pick it up with envMapIntensity around a third, so the lights can stay low.
+  // materials pick it up with envMapIntensity scaled by metalness, so the lights can stay
+  // low. It has to be pre-filtered: r160 samples scene.environment as a cube or a CubeUV
+  // atlas (WebGLProgram's ENVMAP_TYPE switch reads texture.mapping), so a plain equirect
+  // canvas texture compiles a shader that reads a sampler2D as a samplerCube and reflects
+  // nothing at all. PMREM turns it into the CubeUV map the shader actually wants.
   const envCanvas = document.createElement("canvas");
   envCanvas.width = 256;
   envCanvas.height = 128;
@@ -33,10 +37,7 @@ Eco.createRenderer = function (data) {
   sky.beginPath();
   sky.arc(64, 40, 17, 0, 7);
   sky.fill();
-  const environment = new THREE.CanvasTexture(envCanvas);
-  environment.colorSpace = THREE.SRGBColorSpace;
-  environment.mapping = THREE.EquirectangularReflectionMapping;
-  scene.environment = environment;
+  scene.environment = prefilterEnvironment(renderer, envCanvas);
   const camera = new THREE.PerspectiveCamera(
       58,
       innerWidth / innerHeight,
@@ -69,3 +70,28 @@ Eco.createRenderer = function (data) {
 
   return { scene, renderer, camera, planCamera, sun, shadowsDirty };
 };
+
+// Turns the sky canvas into the CubeUV texture the envmap shader actually samples. The
+// filtered target lives for the page's lifetime — the renderer is built once, and only
+// the scene is rebuilt — so it is deliberately not disposed here. A context that cannot
+// pre-filter gets no environment at all rather than a texture read with the wrong sampler.
+function prefilterEnvironment(renderer, canvas) {
+  const source = new THREE.CanvasTexture(canvas);
+  source.colorSpace = THREE.SRGBColorSpace;
+  source.mapping = THREE.EquirectangularReflectionMapping;
+  if (!renderer.capabilities || typeof renderer.getContext !== "function") {
+    source.dispose();
+    return null;
+  }
+  try {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const filtered = pmrem.fromEquirectangular(source);
+    pmrem.dispose();
+    source.dispose();
+    return filtered.texture;
+  } catch (error) {
+    console.warn("Не удалось построить окружение: " + error.message);
+    source.dispose();
+    return null;
+  }
+}

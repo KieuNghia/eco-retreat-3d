@@ -1637,11 +1637,14 @@ Eco.geometry = (() => {
             .map((k) => [k, extra[k]]),
         )}`
       : null;
+    // The sky's contribution has to scale with metalness: a flat 0.35 left the
+    // metalness 0.55 finishes reading matte, no matter how bright the environment is.
+    const metalness = extra.metalness ?? 0;
     const make = () =>
       new THREE.MeshStandardMaterial({
         color,
         roughness: 0.78,
-        envMapIntensity: 0.35,
+        envMapIntensity: extra.envMapIntensity ?? 0.35 + metalness * 0.7,
         ...extra,
       });
     if (!key) return ownMaterial(make());
@@ -2262,15 +2265,39 @@ Eco.makeFurniture = (() => {
     <script>"use strict";
 // One shared off-screen WebGL context, created on first use and reused across
 // editor opens and category changes instead of being rebuilt per open.
-let previewContext = null;
-function getPreviewContext() {
-  if (previewContext) return previewContext;
+//
+// The buffer is sized for the card it lands in rather than a fixed 260×180: catalog
+// images are the panel's content width minus item padding (~266 CSS px here) and are
+// laid out at aspect 13/9 (furnish.css:139-147), so a 260×180 buffer is upscaled on a
+// 2× display and reads soft. The context is rebuilt only if that target width changes.
+const PREVIEW_ASPECT = 13 / 9,
+  MIN_WIDTH = 260,
+  MAX_WIDTH = 512;
+let previewContext = null,
+  contextWidth = 0;
+
+// Device pixels the thumbnail has to fill: card width × display density, capped so the
+// off-screen buffer stays small even on a 3× phone.
+function previewWidth() {
+  const card =
+    document.querySelector("#furnishCatalog .catalog-item img")?.clientWidth ??
+    MIN_WIDTH;
+  const density = Math.min(devicePixelRatio || 1, 2);
+  return Math.round(Math.min(Math.max(card * density, MIN_WIDTH), MAX_WIDTH));
+}
+
+function getPreviewContext(width) {
+  if (previewContext && contextWidth === width) return previewContext;
+  // A stale context is released, not left resident: rebuilding would otherwise
+  // accumulate a second WebGL context per width change.
+  previewContext?.r.dispose();
+  const height = Math.round(width / PREVIEW_ASPECT);
   const r = new THREE.WebGLRenderer({
     antialias: true,
     alpha: false,
     preserveDrawingBuffer: true,
   });
-  r.setSize(260, 180);
+  r.setSize(width, height);
   r.setPixelRatio(1);
   r.outputColorSpace = THREE.SRGBColorSpace;
   r.toneMapping = THREE.ACESFilmicToneMapping;
@@ -2282,12 +2309,14 @@ function getPreviewContext() {
   light.position.set(3, 6, 5);
   s.add(light);
   const c = new THREE.OrthographicCamera(-2, 2, 1.4, -1.4, 0.01, 50);
-  previewContext = { r, s, c };
+  previewContext = { r, s, c, width, height };
+  contextWidth = width;
   return previewContext;
 }
+
 Eco.furniturePreviews = async function (catalog, wantedIndices) {
   const wanted = wantedIndices ?? catalog.map((_, i) => i),
-    { r, s, c } = getPreviewContext(),
+    { r, s, c, width, height } = getPreviewContext(previewWidth()),
     thumbnails = [];
   for (let k = 0; k < wanted.length; k++) {
     const i = wanted[k],
@@ -2311,10 +2340,10 @@ Eco.furniturePreviews = async function (catalog, wantedIndices) {
             mx = Math.max(mx, Math.abs(p.x));
             my = Math.max(my, Math.abs(p.y));
           }
-      const half = Math.max(my, mx / (260 / 180), 0.2) * 1.18;
+      const half = Math.max(my, mx / (width / height), 0.2) * 1.18;
       Object.assign(c, {
-        left: (-half * 260) / 180,
-        right: (half * 260) / 180,
+        left: (-half * width) / height,
+        right: (half * width) / height,
         top: half,
         bottom: -half,
       });
@@ -2640,7 +2669,11 @@ Eco.createRenderer = function (data) {
   renderer.toneMappingExposure = 1.25;
   $("viewport").appendChild(renderer.domElement);
   // One cheap sky gradient does the ambient work that several bright lights used to do:
-  // materials pick it up with envMapIntensity around a third, so the lights can stay low.
+  // materials pick it up with envMapIntensity scaled by metalness, so the lights can stay
+  // low. It has to be pre-filtered: r160 samples scene.environment as a cube or a CubeUV
+  // atlas (WebGLProgram's ENVMAP_TYPE switch reads texture.mapping), so a plain equirect
+  // canvas texture compiles a shader that reads a sampler2D as a samplerCube and reflects
+  // nothing at all. PMREM turns it into the CubeUV map the shader actually wants.
   const envCanvas = document.createElement("canvas");
   envCanvas.width = 256;
   envCanvas.height = 128;
@@ -2656,10 +2689,7 @@ Eco.createRenderer = function (data) {
   sky.beginPath();
   sky.arc(64, 40, 17, 0, 7);
   sky.fill();
-  const environment = new THREE.CanvasTexture(envCanvas);
-  environment.colorSpace = THREE.SRGBColorSpace;
-  environment.mapping = THREE.EquirectangularReflectionMapping;
-  scene.environment = environment;
+  scene.environment = prefilterEnvironment(renderer, envCanvas);
   const camera = new THREE.PerspectiveCamera(
       58,
       innerWidth / innerHeight,
@@ -2692,6 +2722,31 @@ Eco.createRenderer = function (data) {
 
   return { scene, renderer, camera, planCamera, sun, shadowsDirty };
 };
+
+// Turns the sky canvas into the CubeUV texture the envmap shader actually samples. The
+// filtered target lives for the page's lifetime — the renderer is built once, and only
+// the scene is rebuilt — so it is deliberately not disposed here. A context that cannot
+// pre-filter gets no environment at all rather than a texture read with the wrong sampler.
+function prefilterEnvironment(renderer, canvas) {
+  const source = new THREE.CanvasTexture(canvas);
+  source.colorSpace = THREE.SRGBColorSpace;
+  source.mapping = THREE.EquirectangularReflectionMapping;
+  if (!renderer.capabilities || typeof renderer.getContext !== "function") {
+    source.dispose();
+    return null;
+  }
+  try {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const filtered = pmrem.fromEquirectangular(source);
+    pmrem.dispose();
+    source.dispose();
+    return filtered.texture;
+  } catch (error) {
+    console.warn("Не удалось построить окружение: " + error.message);
+    source.dispose();
+    return null;
+  }
+}
 </script>
     <script>"use strict";
 Eco.createNavigation = function ({ camera, planCamera, getData, isBlocked }) {

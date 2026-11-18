@@ -11,8 +11,22 @@ let draw,
   latest,
   canvas,
   previewRenders = 0,
+  previewBufferSize = null,
+  previewContextsDisposed = 0,
+  shadowInvalidations = 0,
   handlers = {},
   nodes = {};
+// The card the thumbnail lands in, as furnish.css lays it out. Null means "the
+// panel is not on screen", which is previews.js' fallback to MIN_WIDTH.
+let catalogCardWidth = null;
+// PMREM bookkeeping: prefilterEnvironment() is the only thing in the app that asks
+// three for a pre-filtered environment, so counting its calls proves the wiring
+// without a GPU. The generator would otherwise compile shaders and need a context.
+let pmremBuilt = 0,
+  pmremFiltered = 0,
+  pmremDisposed = 0,
+  pmremThrows = false;
+const pmremSources = [];
 const gradient = { addColorStop() {} };
 const ctx2d = new Proxy(
   {},
@@ -67,15 +81,41 @@ THREE.WebGLRenderer = class {
   constructor() {
     this.domElement = el();
     canvas ??= this.domElement;
-    this.shadowMap = {};
+    // needsUpdate is counted and cleared on render, the way three does. A path that
+    // forgets to bump it shows as a stale shadow, never a crash, so the coverage
+    // assertions count invalidations per operation instead of trusting call sites.
+    this.shadowMap = {
+      enabled: false,
+      autoUpdate: true,
+      type: null,
+      _needsUpdate: false,
+      get needsUpdate() {
+        return this._needsUpdate;
+      },
+      set needsUpdate(value) {
+        this._needsUpdate = Boolean(value);
+        if (this._needsUpdate) shadowInvalidations++;
+      },
+    };
+    // A real WebGLRenderer always exposes both, so prefilterEnvironment() takes its
+    // PMREM branch here; THREE.PMREMGenerator is stubbed below to stay headless. The
+    // failure branch is exercised separately by flipping pmremThrows.
+    this.capabilities = {};
+    this.getContext = () => ctx2d;
   }
   setPixelRatio() {}
-  setSize() {}
-  dispose() {}
+  // Only the off-screen preview renderers matter: the page canvas keeps its size.
+  setSize(w, h) {
+    if (canvas !== this.domElement) previewBufferSize = { w, h };
+  }
+  dispose() {
+    if (canvas !== this.domElement) previewContextsDisposed++;
+  }
   render(scene, camera) {
     scene.updateMatrixWorld(true);
     camera.updateMatrixWorld(true);
     latest = { scene, camera };
+    this.shadowMap._needsUpdate = false;
     if (this.domElement !== canvas) {
       previewRenders++;
       const meshes = [];
@@ -98,11 +138,32 @@ THREE.WebGLRenderer = class {
     }
   }
 };
+// Headless stand-in for three's PMREMGenerator: the real one compiles shaders into
+// a WebGLRenderTarget. What the app depends on is the call surface (construct,
+// fromEquirectangular, dispose) and that the texture handed to scene.environment is
+// a render-target texture, never the raw equirect canvas.
+THREE.PMREMGenerator = function (renderer) {
+  pmremBuilt++;
+  return {
+    fromEquirectangular: (source) => {
+      pmremFiltered++;
+      pmremSources.push(source);
+      if (pmremThrows) throw new Error("no frame buffer");
+      const texture = new THREE.Texture();
+      texture.isRenderTargetTexture = true;
+      return { texture };
+    },
+    dispose() {
+      pmremDisposed++;
+    },
+  };
+};
+
 const document = {
   getElementById: (id) => (nodes[id] ??= el(id)),
   createElement: () => el(),
   body: el(),
-  querySelector: () => null,
+  querySelector: (sel) => (sel.includes("catalog-item") ? { clientWidth: catalogCardWidth } : null),
   querySelectorAll: (sel) =>
     sel === ".catalog-item" ? (nodes.furnishCatalog?.children ?? []) : [],
   exitPointerLock() {},
@@ -335,6 +396,35 @@ console.log(
 
 const modelNow = () => JSON.parse(nodes.json.value);
 const count = modelNow().furniture.length;
+
+// Preview buffer sizing has to follow the card it lands in, and the shared
+// off-screen context must be released rather than accumulated when that target
+// changes. An empty wanted list reaches getPreviewContext without rendering, so
+// the per-item preview counts asserted below stay untouched.
+const repreview = () => sandbox.Eco.furniturePreviews(sandbox.furnitureCatalog, []);
+catalogCardWidth = 266;
+sandbox.devicePixelRatio = 2;
+repreview();
+assert.equal(previewRenders, 0, "Sizing the preview buffer renders no item twice");
+assert.equal(previewBufferSize.w, 512, "A dense card raises the buffer to its ceiling");
+assert(Math.abs(previewBufferSize.w / previewBufferSize.h - 13 / 9) < 0.01, "Buffer keeps the card aspect");
+catalogCardWidth = 100;
+sandbox.devicePixelRatio = 1;
+repreview();
+assert.equal(previewBufferSize.w, 260, "A card narrower than the panel keeps the minimum buffer");
+assert.equal(previewContextsDisposed, 1, "The stale context is released when the target changes");
+catalogCardWidth = 266;
+repreview();
+assert.equal(previewBufferSize.w, 266, "The buffer matches the card at device density");
+repreview();
+assert.equal(previewContextsDisposed, 2, "An unchanged target reuses the context instead of leaking one");
+catalogCardWidth = null;
+sandbox.devicePixelRatio = 1;
+repreview();
+assert.equal(previewContextsDisposed, 3, "The panel-sized context replaces the card-sized one");
+console.log(
+  "Preview buffers follow the catalog card, clamp at both ends and release the stale context",
+);
 
 nodes.tape.onclick();
 nodes.furnish.onclick();
@@ -997,6 +1087,112 @@ assert(latest.camera.isPerspectiveCamera, "Editing returns to the 3D camera");
 console.log(
   "The walker is collided with rotated furniture, not with an axis-aligned box",
 );
+
+// Shadow invalidation coverage. `shadowMap.autoUpdate` is off (renderer.js:13), so every
+// path that changes geometry, visibility or mode must bump needsUpdate itself — a missed
+// path is a stale shadow, not a crash, which is exactly what this counts.
+const expectShadowRefresh = (label, run) => {
+  shadowInvalidations = 0;
+  run();
+  assert(shadowInvalidations > 0, label);
+};
+expectShadowRefresh("Plan mode refreshes shadows", () => nodes.plan.onclick());
+expectShadowRefresh("Walk mode refreshes shadows", () => nodes.walk.onclick());
+expectShadowRefresh("Orbit mode refreshes shadows", () => nodes.orbit.onclick());
+expectShadowRefresh("Wall-cut toggle refreshes shadows", () => {
+  nodes.low.checked = false;
+  nodes.low.onchange();
+  nodes.low.checked = true;
+  nodes.low.onchange();
+});
+expectShadowRefresh("Furniture visibility toggle refreshes shadows", () => {
+  nodes.furniture.checked = false;
+  nodes.furniture.onchange();
+  nodes.furniture.checked = true;
+  nodes.furniture.onchange();
+});
+expectShadowRefresh("Label toggle refreshes shadows", () => {
+  nodes.labels.checked = false;
+  nodes.labels.onchange();
+  nodes.labels.checked = true;
+  nodes.labels.onchange();
+});
+expectShadowRefresh("Imported model rebuild refreshes shadows", () =>
+  loadModel(cornerLane(4.4)));
+expectShadowRefresh("Dimension edit refreshes shadows", () => {
+  nodes.width.value = "11";
+  nodes.applyDimensions.onclick();
+});
+expectShadowRefresh("Original-layout reset refreshes shadows", () =>
+  nodes.resetLayout.onclick());
+nodes.furnish.onclick();
+assert(!nodes.furnishPanel.hidden, "The editor is open for the item-level paths");
+expectShadowRefresh("Adding an item refreshes shadows", () => {
+  nodes.furnishCatalog.children[0].onclick();
+  selectPoint(2, 2);
+  draw(20100);
+});
+expectShadowRefresh("Dragging an item refreshes shadows", () => {
+  canvas.pointerdown(pointerAt(2, 2));
+  canvas.pointermove(pointerAt(2.4, 2.6));
+  canvas.pointerup(pointerAt(2.4, 2.6));
+});
+expectShadowRefresh("Rotating an item refreshes shadows", () =>
+  nodes.furnishRotateRight.onclick());
+expectShadowRefresh("Deleting an item refreshes shadows", () =>
+  nodes.furnishDelete.onclick());
+expectShadowRefresh("Undo refreshes shadows", () => nodes.furnishUndo.onclick());
+expectShadowRefresh("Redo refreshes shadows", () => nodes.furnishRedo.onclick());
+// Every path above either replaced the model or moved an item, so hand the pristine
+// layout back to the checks that follow, and prove it landed intact. The item-level
+// paths above all ran with the editor open, so leave it open here too: the checks
+// below drive item-level gestures and would silently no-op in a closed editor.
+restoreLayout();
+assert(!nodes.furnishPanel.hidden, "The editor is still open for the checks that follow");
+
+// The sky has to reach the shader as a pre-filtered map: r160 derives ENVMAP_TYPE
+// from texture.mapping, so a raw equirect canvas texture makes the envmap shader
+// sample a sampler2D through a samplerCube and reflect nothing at all. THREE.PMREMGenerator
+// is stubbed here, so this pins the call surface and the texture kind — not a pixel.
+assert(pmremBuilt >= 1, "The renderer pre-filters the sky instead of assigning the canvas");
+assert.equal(pmremBuilt, pmremFiltered, "Every generator is used to filter once");
+assert.equal(pmremBuilt, pmremDisposed, "Every generator is released, so no buffer stays resident");
+assert(
+  pmremSources.every(
+    (source) =>
+      source.mapping === THREE.EquirectangularReflectionMapping &&
+      source.colorSpace === THREE.SRGBColorSpace,
+  ),
+  "The generator receives the equirect sky in sRGB",
+);
+assert(
+  latest.scene.environment?.isRenderTargetTexture === true,
+  "scene.environment is the pre-filtered map, never a raw canvas texture",
+);
+// A context that cannot allocate the map leaves the scene lit by lights only,
+// which beats crashing on startup or handing the shader the wrong sampler.
+pmremThrows = true;
+assert.equal(
+  sandbox.prefilterEnvironment({ capabilities: {}, getContext: () => ctx2d }, el()),
+  null,
+  "A context without a frame buffer gets no environment instead of a broken one",
+);
+pmremThrows = false;
+const metalMat = sandbox.Eco.geometry.mat("#b6ccd0", {
+  metalness: 0.55,
+  roughness: 0.16,
+});
+const matteMat = sandbox.Eco.geometry.mat("#b6ccd0");
+assert(
+  metalMat.envMapIntensity > 0.6,
+  "Metallic finishes scale their sky contribution with metalness",
+);
+assert.equal(
+  matteMat.envMapIntensity,
+  0.35,
+  "Matte finishes keep the low ambient the lights were tuned against",
+);
+console.log("Shadow invalidation and sky environment coverage OK");
 
 async function checkLazyPreviews() {
   for (

@@ -1,7 +1,7 @@
 # Improvement plan — eco-retreat-3d
 
-Repo: https://github.com/KieuNghia/eco-retreat-3d (branch `main`, HEAD `efedf57`, pushed 2026-11-18)
-Everything below was verified against the actual source, not inferred from filenames. Line references point at this checkout and were re-checked on 2026-11-18 (macOS, git 2.50.1, Node v24.11.0); `npm test` and `npm run check:bundle` pass.
+Repo: https://github.com/KieuNghia/eco-retreat-3d (branch `main`, HEAD `875c0ab` with the P1 renderer work committed on top of it; `origin/main` still at `efedf57`)
+Everything below was verified against the actual source, not inferred from filenames. Line references point at this checkout and were re-checked on 2026-11-18 (macOS, git 2.50.1, Node v24.11.0); `npm test` and `npm run check:bundle` pass. Line numbers inside `work/check-model.cjs` predate the P1 assert groups, which were appended to the existing checks.
 
 **Status legend:** ✅ done · ⬜ open · ✖ dropped (the claim was wrong, do not "fix" it)
 
@@ -20,18 +20,18 @@ Everything below was verified against the actual source, not inferred from filen
 - **The committed 3.97 MB `Eco-Retreat.html` currently matches the sources exactly** (`npm run check:bundle`). That must stay true — rerun `npm run build` after any source edit.
 - Accessibility and touch effort already exists: `aria-pressed`, `aria-label`, `role="status"` live regions (`index.html:38`, `82`, `133`), an on-screen d-pad (`index.html:47`, `style.css:252-264`).
 
-So what is left: performance follow-ups, the two feature gaps, tests/CI, docs/engine provenance.
+So what is left: the two feature gaps, tests/CI polish, docs/engine provenance. The renderer follow-ups are closed (P1 below).
 
 ---
 
-## P1 ⬜ Renderer follow-ups
-**Effort: S. The heavy lifting landed in `d4f1acf`; these are the leftovers.**
+## P1 ✅ Renderer follow-ups
+**Effort: S. The heavy lifting landed in `d4f1acf`; the leftovers closed on top of `875c0ab`, with `npm test` green and two new assert groups running in every checker.**
 
-1. ⬜ **Draw-call audit.** Items merge into one mesh via `mergeBoxes()` (`geometry.js:205-285`, called at `furniture-mesh.js:400-401`), so the default scene is well under 270 calls today. Re-measure with a large layout (the validator allows 500 items, `model-state.js:79`) before adding InstancedMesh — do not optimise on the old numbers.
-2. ⬜ **Sub-15 cm primitives inside a merged mesh.** `merged.castShadow = parts.some(p => p.castShadow)` (`geometry.js:279-280`), so legs and trims cast with the body they are merged into. The old per-primitive carve-out is moot; decide per item type (rugs, thin trims) instead.
-3. ⬜ **`shadowsDirty()` coverage.** Confirm every path that changes geometry or mode bumps `needsUpdate` — a missed path shows as a stale shadow, not a crash.
-4. ⬜ **Preview resolution.** Previews now reuse one off-screen context and render lazily per category (`previews.js:3-26`, `furnish.js:32-56`, 260×180 at pixel ratio 1). Check the thumbnails against ~40 px tiles; raise only if they read soft.
-5. ⬜ **Metal reflection.** The gradient env map is generic and `envMapIntensity` is pinned at 0.35 for every material (`geometry.js:101`); the metalness 0.55 finishes (`furniture-mesh.js:117`) still read flat. Only worth a real HDR if someone complains.
+1. ✅ **Draw-call audit.** `work/audit-draw-calls.cjs` (new, wired into `work/run-all.cjs`) measures the merged scene headless: **378** draw calls for the default layout (226 meshes + 152 shadow casters, 19 024 triangles, 75 materials) and **3477** at the validator ceiling of 500 items (2304 meshes + 1173 casters, 92 940 triangles, 143 materials) — 34 % of the worst frame is the shadow pass. Decision: **stay with `mergeBoxes()`, no InstancedMesh** — named parts, glass parts and per-item mesh identity (`syncFurniture`, undo/redo) all survive instancing badly, and the cost only matters at layouts nobody builds. The asserts (<400 default, <3600 max, some non-casters, ≤10 meshes per type) are regression guards, not targets.
+2. ✅ **Sub-15 cm primitives inside a merged mesh.** `merged.castShadow = parts.some(p => p.castShadow)` (`geometry.js:282`) is now the whole rule: `solid()` (`geometry.js:64-71`) rejects foils ≤0.02 m, dust chips and two-axis <0.06 m parts, so a merged body casts only when a real volume is inside. Audit records the per-type outcome across all 81 variants: `rug` and `wallCabinet` are the only non-casters, and **no variant made purely of thin parts still casts** — asserted.
+3. ✅ **`shadowsDirty()` coverage.** `work/check-model.cjs` instruments `needsUpdate` on the fake renderer (a path that forgets to bump it is a stale shadow, never a crash) and asserts a bump on 16 paths: plan/walk/orbit, wall-cut, furniture and label toggles, import, `applyDimensions`, `resetLayout`, add, drag, rotate, delete, undo, redo. The fake clears `needsUpdate` on render, like three.
+4. ✅ **Preview resolution.** One shared off-screen context, rebuilt only when the target width changes; the width is the catalog card × device density, clamped to 260–512 px at the card aspect 13/9 (`previews.js:9-23`, `furnish.css:139-147`). Asserted: 266 px card at 2× hits the 512 ceiling, a 100 px card clamps to 260, 266 px at 1× lands exactly on 266, an unchanged target reuses the context, and every width change disposes the old context (counted in the fake renderer). Sizing with an empty wanted list renders nothing, so the "exactly once" counts stay.
+5. ✅ **Metal reflection.** `envMapIntensity` is `0.35 + metalness * 0.7` (`geometry.js:104`), and the sky is pre-filtered with `THREE.PMREMGenerator` (`renderer.js:78-97`). The second half was a real bug: r160 derives `ENVMAP_TYPE` from `texture.mapping`, so the previous raw equirect `CanvasTexture` compiled a shader sampling a `sampler2D` through a `samplerCube` and reflected nothing at any brightness. Asserted headless by stubbing the generator: build/filter/dispose stay balanced, the source is equirect + sRGB, `scene.environment.isRenderTargetTexture` is true, and the no-frame-buffer branch yields no environment rather than a wrong sampler.
 
 ---
 
@@ -61,7 +61,7 @@ Remaining polish only: ⬜ a visible "restored from autosave" banner that is dis
 ## P4 ✅ Tests and CI
 **Effort: M. Builds on the now-working P0 toolchain.**
 
-The five scripts in `work/` are real checks, and `ARCHITECTURE.md` honestly states `WebGLRenderer` and the DOM are replaced and this is not a pixel/GPU test. `check-model.cjs` builds a Proxy-based fake element and replaces `THREE.WebGLRenderer` with an instrumented one; the bundle branch asserts the vendor script is index 0 (`work/check-model.cjs:155-172`) and runs every bundled script through the same sandbox.
+The six scripts in `work/` are real checks, and `ARCHITECTURE.md` honestly states `WebGLRenderer` and the DOM are replaced and this is not a pixel/GPU test. `check-model.cjs` builds a Proxy-based fake element and replaces `THREE.WebGLRenderer` with an instrumented one; the bundle branch asserts the vendor script is index 0 (`work/check-model.cjs:155-172`) and runs every bundled script through the same sandbox.
 
 The seams that were uncovered are now covered in `work/check-model.cjs`:
 
@@ -74,6 +74,8 @@ The seams that were uncovered are now covered in `work/check-model.cjs`:
 - ✅ `applyDimensions` preserving clearances — no wall crossing and no item outside the envelope at 9×7, 12×7, 9×10, 12×10, and an aspect-preserving resize scales existing overlaps exactly.
 
 GitHub Actions runs `npm test` on Ubuntu across Node 18/20/22 (`.github/workflows/test.yml`) — headless, no GPU needed, and it includes the bundle drift guard. An optional real-browser smoke test must not break the double-click-`file://` promise.
+
+⬜ **The matrix is red today, and not because of the app.** `Array.prototype.at(-1)` is used 21 times in `work/check-model.cjs` and `work/check-kitchen.cjs` (`check-kitchen.cjs:61`, `check-model.cjs:454`) and only exists from Node 22; `package.json` declares `node >= 18` and the workflow tests 18 and 20. Either drop those two legs or stop using `.at(-1)` in the checkers — the app sources themselves never call it.
 
 ---
 
@@ -132,7 +134,7 @@ Revisit only if a feature genuinely needs a newer release.
 | 2 | ✅ **P4** round-trip + snap tests, CI on Linux | M | Safety net before the larger P3 work |
 | 3 | **P3.5** touch layout (bottom sheet, pinch, `pointerId`) | M | Editor becomes usable on a phone |
 | 4 | **P3.1/3.2** wall editor + JSON migration | L | Turns a reconstruction into an adjustable model |
-| 5 | **Small PRs** + **P1** follow-ups | S | Polish, no new architecture |
+| 5 | ✅ **P1 follow-ups** (landed) + ⬜ **Small PRs** | S | Polish, no new architecture |
 | 6 | **P5** catalog count fix, i18n, CONTRIBUTING, release + demo GIF | M | Outside contributors and users |
 | 7 | **P6** pin documented with checksum and licence | S | No surprise engine dead end |
 

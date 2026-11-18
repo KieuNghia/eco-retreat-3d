@@ -94,11 +94,14 @@ Eco.geometry = (() => {
             .map((k) => [k, extra[k]]),
         )}`
       : null;
+    // The sky's contribution has to scale with metalness: a flat 0.35 left the
+    // metalness 0.55 finishes reading matte, no matter how bright the environment is.
+    const metalness = extra.metalness ?? 0;
     const make = () =>
       new THREE.MeshStandardMaterial({
         color,
         roughness: 0.78,
-        envMapIntensity: 0.35,
+        envMapIntensity: extra.envMapIntensity ?? 0.35 + metalness * 0.7,
         ...extra,
       });
     if (!key) return ownMaterial(make());

@@ -41,6 +41,7 @@ node work/check-model.cjs             # полный сценарий: сцен�
 node work/check-refactor.cjs          # сохранность стен/ID при редактировании, некорректный импорт, ориентированные коллизии
 node work/check-kitchen.cjs           # кухонные модули, интегрированные столешницы, высота установки (Y)
 node work/check-camera.cjs            # орбита и панорамирование по полу в 3D и виде сверху
+node work/audit-draw-calls.cjs        # измерить draw calls и shadow casters: default layout и до 500 objects
 node work/audit-layout.cjs            # выявляет мебель, пересекающую стены
 npm test                              # запустить всё сразу + проверку bundle-дрифта
 ```
@@ -57,6 +58,15 @@ npm run check:bundle    # проверяет: перепакованный HTML 
 Сборка читает список CSS/JS из index.html, поэтому новая зависимость не требует второго списка в скрипте сборки. reference.png встраивается в автономный HTML.
 
 Тесты проверяют старые взаимодействия, 81 вариант мебели, магнитную стыковку, реальные геометрические габариты, сохранность стен при редактировании, ID/историю, некорректный импорт и исключение при построении, повёрнутые коллизии. `npm run check:bundle` сравнивает собранный в памяти HTML с файлом в репозитории и не перезаписывает его; `npm test` дополнительно запускает сценарий против встроенных скриптов готового HTML. Используется настоящая геометрия Three.js, но WebGLRenderer и DOM подменены. Это не тест пикселей, реальных диалогов и производительности GPU.
+
+## Rendering budget and what enforces it
+
+- **Draw calls.** `work/audit-draw-calls.cjs` measures the scene: the default layout costs 378 draw calls (226 meshes + 152 shadow casters), the largest layout the validator accepts (500 objects) — 3477 (2304 + 1173). These numbers are regression guards, not benchmarks: there is no GPU here. Deliberately did not switch to InstancedMesh: named parts (the app finds them by name) and glass parts (the app toggles them separately) do not survive merging into one instance, and per-object meshes are used by `syncFurniture` and undo/redo.
+- **Shadow map.** `autoUpdate = false` (the room is nearly static), so every path that changes geometry, visibility or mode must raise `needsUpdate` itself. `work/check-model.cjs` counts invalidations per path (three modes, wall cut, furniture visibility, labels, import, resize, reset to the original layout, add, drag, rotate, delete, undo, redo). Missed paths become stale shadows, not errors.
+- **Sky environment.** It only works when pre-filtered: r160 samples `scene.environment` as a cube or CubeUV atlas (the shader's `ENVMAP_TYPE` is taken from `texture.mapping`), so a raw equirectangular canvas texture compiles a shader that reads `sampler2D` through `samplerCube` and reflects nothing at all. `prefilterEnvironment` builds a PMREM map and releases the generator and the source; if the buffer cannot be allocated, the scene gets no environment and is lit only by lights.
+- **Materials.** `envMapIntensity` = `0.35 + metalness * 0.7` (`geometry.js`): a fixed 0.35 left surfaces with metalness 0.55 looking matte, no matter how bright the environment is. Values passed explicitly take priority.
+- **Previews.** One off-screen context for all previews; the buffer is sized by the card and device density (clamped at 260–512 px, aspect 13/9), not by the old constant 260×180. When the target changes, the previous context is released and not left resident.
+- **Shadow casters.** A merged mesh casts if at least one of its parts casts; thin foils and dust-sized chips do not cast (`solid()` in `geometry.js`); rugs and items composed only of such parts do not cast. `audit-draw-calls.cjs` asserts this policy for all 81 variants of the catalog, so shadows cannot silently change with the geometry.
 
 ## Ручная приёмка в браузере
 

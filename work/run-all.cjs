@@ -12,6 +12,7 @@ const checks = [
   "work/check-camera.cjs",
   "work/check-kitchen.cjs",
   "work/audit-layout.cjs",
+  "work/audit-draw-calls.cjs",
   "work/package-v2.cjs",
 ];
 
