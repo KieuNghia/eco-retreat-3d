@@ -1,5 +1,7 @@
 # Eco Retreat — новая модель по исходной картинке
 
+[![Tests](https://github.com/KieuNghia/eco-retreat-3d/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/KieuNghia/eco-retreat-3d/actions/workflows/test.yml)
+
 ## Запуск
 
 Откройте `Eco-Retreat.html` двойным щелчком в Chrome или Edge. Он содержит все ресурсы и работает без интернета. Если встроенный просмотрщик не запускает страницу, откройте файл обычным браузером. Для исходного проекта также можно открыть `index.html`, сохранив соседние файлы и папку `vendor`.

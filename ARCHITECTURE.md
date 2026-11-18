@@ -59,6 +59,8 @@ npm run check:bundle    # проверяет: перепакованный HTML 
 
 Тесты проверяют старые взаимодействия, 81 вариант мебели, магнитную стыковку, реальные геометрические габариты, сохранность стен при редактировании, ID/историю, некорректный импорт и исключение при построении, повёрнутые коллизии. `npm run check:bundle` сравнивает собранный в памяти HTML с файлом в репозитории и не перезаписывает его; `npm test` дополнительно запускает сценарий против встроенных скриптов готового HTML. Используется настоящая геометрия Three.js, но WebGLRenderer и DOM подменены. Это не тест пикселей, реальных диалогов и производительности GPU.
 
+Continuous integration (`.github/workflows/test.yml`, badge in README) runs the same headless commands on Ubuntu across Node 18, 20, 22 and 24. Each leg first asserts that the Node it claims is really the one it runs, because 18 and 20 are EOL and no longer preinstalled on the image. `Array.prototype.at()` is used nowhere in the checkers, so nothing depends on an engine convenience method that arrives later than the declared floor.
+
 ## Rendering budget and what enforces it
 
 - **Draw calls.** `work/audit-draw-calls.cjs` measures the scene: the default layout costs 378 draw calls (226 meshes + 152 shadow casters), the largest layout the validator accepts (500 objects) — 3477 (2304 + 1173). These numbers are regression guards, not benchmarks: there is no GPU here. Deliberately did not switch to InstancedMesh: named parts (the app finds them by name) and glass parts (the app toggles them separately) do not survive merging into one instance, and per-object meshes are used by `syncFurniture` and undo/redo.

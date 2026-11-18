@@ -1,6 +1,6 @@
 # Improvement plan — eco-retreat-3d
 
-Repo: https://github.com/KieuNghia/eco-retreat-3d (branch `main`, HEAD `875c0ab` with the P1 renderer work committed on top of it; `origin/main` still at `efedf57`)
+Repo: https://github.com/KieuNghia/eco-retreat-3d (branch `main`, HEAD pushed and `origin/main` matching it — the workflow landed in `875c0ab` and GitHub has run it since)
 Everything below was verified against the actual source, not inferred from filenames. Line references point at this checkout and were re-checked on 2026-11-18 (macOS, git 2.50.1, Node v24.11.0); `npm test` and `npm run check:bundle` pass. Line numbers inside `work/check-model.cjs` predate the P1 assert groups, which were appended to the existing checks.
 
 **Status legend:** ✅ done · ⬜ open · ✖ dropped (the claim was wrong, do not "fix" it)
@@ -75,7 +75,7 @@ The seams that were uncovered are now covered in `work/check-model.cjs`:
 
 GitHub Actions runs `npm test` on Ubuntu across Node 18/20/22 (`.github/workflows/test.yml`) — headless, no GPU needed, and it includes the bundle drift guard. An optional real-browser smoke test must not break the double-click-`file://` promise.
 
-✅ **The CI floor is real; the old reason for a red matrix was wrong twice over.** `Array.prototype.at(-1)` is used 21 times in `work/check-model.cjs` and `work/check-kitchen.cjs`, but it is **not** a Node 22 feature: V8 10.1 shipped `at()`, so a real `node-v18.0.0` binary evaluates `[1,2].at(-1)` as `2`. What was actually broken is that **CI never ran at all** — `.github/workflows/test.yml` exists only in the local history (added at `875c0ab`, never pushed, `origin/main` is still `efedf57`), so GitHub has no workflow, no run and no badge. The checkers now share one `lastItem()` index lookup (`check-model.cjs:10`, exported and imported by `check-kitchen.cjs`) so no assert leans on an engine convenience method, the matrix is 18/20/22/24, and `node work/run-all.cjs` passes on every one of those binaries, GPU-free.
+✅ **The CI floor is real; the old reason for a red matrix was wrong twice over.** `Array.prototype.at(-1)` is used 21 times in `work/check-model.cjs` and `work/check-kitchen.cjs`, but it is **not** a Node 22 feature: V8 10.1 shipped `at()`, so a real `node-v18.0.0` binary evaluates `[1,2].at(-1)` as `2`. What was actually broken is that **CI never ran at all** — `.github/workflows/test.yml` exists only in the local history (added at `875c0ab`, never pushed, `origin/main` is still `efedf57`), so GitHub has no workflow, no run and no badge. The checkers now share one `lastItem()` index lookup (`check-model.cjs:14`, exported and imported by `check-kitchen.cjs`) so no assert leans on an engine convenience method at all; the matrix is 18/20/22/24 and each leg asserts the major it claims before running anything (`node work/run-all.cjs` passes on real `v18.0.0`, `v18.20.5`, `v20.19.5`, `v22.23.5` and `v24.11.0` binaries). GitHub has now run it twice, both green, and README carries the badge.
 
 ---
 
