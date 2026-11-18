@@ -12,16 +12,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The project has no dependencies; every supported Node release runs the
-        # same headless checks (engines says >=18). The matrix covers that floor,
-        # the last two LTS lines and the current one, headless and GPU-free.
+        # The project has no dependencies; every supported Node line runs the
+        # same headless checks (package.json engines says node >= 18). The floor,
+        # the last two LTS lines and the current one are all covered, GPU-free.
         node-version: ["18", "20", "22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      # npm test runs the geometry, editor, camera, kitchen and layout audits and
-      # the bundle drift guard against the committed Eco-Retreat.html; nothing is
-      # installed because there are no dependencies.
+      # Node 18 and 20 are EOL and no longer preinstalled, and setup-node keeps
+      # installing them from nodejs.org. Assert the major before trusting a leg,
+      # so a leg can never claim an engine it never ran.
+      - name: Assert the Node leg
+        run: node -e 'const want = process.argv[1], got = process.version; if (got.replace(/^v/, "").split(".")[0] != want) { console.error("leg " + want + " resolved to " + got); process.exit(1); } console.log("engine " + got);' '${{ matrix.node-version }}'
+      # npm test runs the geometry, editor, camera, kitchen and layout audits, the
+      # draw-call and shadow audits and the bundle drift guard against the
+      # committed Eco-Retreat.html; nothing is installed because there are no
+      # dependencies.
       - run: npm test
