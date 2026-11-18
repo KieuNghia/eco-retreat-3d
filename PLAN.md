@@ -75,7 +75,7 @@ The seams that were uncovered are now covered in `work/check-model.cjs`:
 
 GitHub Actions runs `npm test` on Ubuntu across Node 18/20/22 (`.github/workflows/test.yml`) — headless, no GPU needed, and it includes the bundle drift guard. An optional real-browser smoke test must not break the double-click-`file://` promise.
 
-⬜ **The matrix is red today, and not because of the app.** `Array.prototype.at(-1)` is used 21 times in `work/check-model.cjs` and `work/check-kitchen.cjs` (`check-kitchen.cjs:61`, `check-model.cjs:454`) and only exists from Node 22; `package.json` declares `node >= 18` and the workflow tests 18 and 20. Either drop those two legs or stop using `.at(-1)` in the checkers — the app sources themselves never call it.
+✅ **The CI floor is real; the old reason for a red matrix was wrong twice over.** `Array.prototype.at(-1)` is used 21 times in `work/check-model.cjs` and `work/check-kitchen.cjs`, but it is **not** a Node 22 feature: V8 10.1 shipped `at()`, so a real `node-v18.0.0` binary evaluates `[1,2].at(-1)` as `2`. What was actually broken is that **CI never ran at all** — `.github/workflows/test.yml` exists only in the local history (added at `875c0ab`, never pushed, `origin/main` is still `efedf57`), so GitHub has no workflow, no run and no badge. The checkers now share one `lastItem()` index lookup (`check-model.cjs:10`, exported and imported by `check-kitchen.cjs`) so no assert leans on an engine convenience method, the matrix is 18/20/22/24, and `node work/run-all.cjs` passes on every one of those binaries, GPU-free.
 
 ---
 
@@ -117,6 +117,7 @@ Revisit only if a feature genuinely needs a newer release.
 ## ✖ Dropped claims (verified false in this checkout — do not re-add)
 
 - **"Import rejects `-0`."** `validate()` uses `Number.isFinite(v) && v >= min && v <= max` (`model-state.js:66`), and `Number.isFinite(-0)` is `true`, so a rotated table exporting `-0` imports fine. There is no round-trip failure here.
+- **"`.at(-1)` only exists from Node 22."** `Array.prototype.at()` shipped with V8 10.1, which is inside Node 18.0.0 — a real `node-v18.0.0` binary evaluates `[1,2].at(-1)` as `2`. The real P4 defect was that the workflow sits in an unpushed commit, so CI had never run.
 - **"`wallColliders` is dead code."** It is read by `blocked()` (`app.js:139`); built at `apartment-scene.js:23` and `120`.
 - **"Unused parameter in `snapFurniture`."** `excludeIndex` is declared (`furniture-snap.js:5`) and passed at the only call site (`furnish.js:226`).
 - **"No `aria-live`."** `role="status"` is already an implicit live region (`index.html:38`, `82`, `133`).

@@ -5,7 +5,13 @@ const fs = require("fs"),
 
 // All paths are script-relative to the repo root.
 const SRC = path.resolve(__dirname, "..");
+
 const THREE = require(path.join(SRC, "vendor/three.min.js"));
+
+// package.json declares node >= 18 and CI runs that floor, so the checkers stay
+// inside what ES2022 guarantees: "the last item" is an index lookup rather than
+// an engine-specific convenience (exported for the checkers that require this one).
+const lastItem = (a) => a[a.length - 1];
 
 let draw,
   latest,
@@ -451,19 +457,19 @@ assert.equal(
   count + 1,
   "Add catalog item on floor",
 );
-assert.equal(modelNow().furniture.at(-1).w, 2);
+assert.equal(lastItem(modelNow().furniture).w, 2);
 
 nodes.furnishRotateRight.onclick();
 draw(18400);
-assert(Math.abs(modelNow().furniture.at(-1).rotation + Math.PI / 2) < 1e-8);
+assert(Math.abs(lastItem(modelNow().furniture).rotation + Math.PI / 2) < 1e-8);
 
 nodes.furnishW.value = "1.8";
 nodes.furnishD.value = "1.4";
 nodes.furnishH.value = ".8";
 nodes.furnishApply.onclick();
 draw(18500);
-assert.equal(modelNow().furniture.at(-1).d, 1.4, "Editable dimensions");
-assert.equal(modelNow().furniture.at(-1).h, 0.8);
+assert.equal(lastItem(modelNow().furniture).d, 1.4, "Editable dimensions");
+assert.equal(lastItem(modelNow().furniture).h, 0.8);
 
 function pointerAt(x, z) {
   const p = new THREE.Vector3(x, 0, z).project(latest.camera);
@@ -479,11 +485,11 @@ canvas.pointermove(pointerAt(2.4, 2.6));
 canvas.pointerup(pointerAt(2.4, 2.6));
 draw(18600);
 assert(
-  Math.abs(modelNow().furniture.at(-1).x - 2.4) < 1e-8,
+  Math.abs(lastItem(modelNow().furniture).x - 2.4) < 1e-8,
   "Drag furniture in X",
 );
 assert(
-  Math.abs(modelNow().furniture.at(-1).z - 2.6) < 1e-8,
+  Math.abs(lastItem(modelNow().furniture).z - 2.6) < 1e-8,
   "Drag furniture in Z",
 );
 
@@ -540,7 +546,7 @@ selectPoint(3, 5);
 draw(18900);
 assert(!latest.scene.getObjectByName("placement-preview"));
 assert(
-  Math.abs(modelNow().furniture.at(-1).rotation + Math.PI / 2) < 1e-8,
+  Math.abs(lastItem(modelNow().furniture).rotation + Math.PI / 2) < 1e-8,
   "Preview rotation carried into placed model",
 );
 
@@ -574,7 +580,7 @@ console.log(
   "All catalog previews fit frames; 3D editor, placement ghost, rotation and camera gestures OK",
 );
 
-const movedBefore = modelNow().furniture.at(-1),
+const movedBefore = lastItem(modelNow().furniture),
   viewBefore = latest.camera.position.clone();
 const surface = new THREE.Vector3(movedBefore.x, 0.41, movedBefore.z).project(
     latest.camera,
@@ -599,10 +605,10 @@ canvas.pointermove({
 canvas.pointerup(pointerAt(floorHit.x + 0.3, floorHit.z + 0.4));
 draw(19200);
 assert(
-  Math.abs(modelNow().furniture.at(-1).x - movedBefore.x - 0.3) < 1e-7,
+  Math.abs(lastItem(modelNow().furniture).x - movedBefore.x - 0.3) < 1e-7,
   "Furniture moves horizontally in perspective",
 );
-assert(Math.abs(modelNow().furniture.at(-1).z - movedBefore.z - 0.4) < 1e-7);
+assert(Math.abs(lastItem(modelNow().furniture).z - movedBefore.z - 0.4) < 1e-7);
 assert(
   latest.camera.position.distanceTo(viewBefore) < 1e-8,
   "Moving furniture does not orbit camera",
@@ -658,7 +664,7 @@ canvas.pointermove(pressed);
 canvas.pointerdown(pressed);
 canvas.pointerup(pressed);
 draw(19300);
-const placed = modelNow().furniture.at(-1);
+const placed = lastItem(modelNow().furniture);
 assert.equal(placed.type, wardrobe.type, "The catalog item was placed");
 assert(Math.abs(placed.z - flushZ) < 1e-6, "Placement joins the partition");
 assert(
@@ -670,7 +676,7 @@ const draftAngle = (15 * Math.PI) / 180;
 nodes.furnishAngle.value = "15";
 nodes.furnishApply.onclick();
 draw(19330);
-assert(Math.abs(modelNow().furniture.at(-1).rotation - draftAngle) < 1e-9);
+assert(Math.abs(lastItem(modelNow().furniture).rotation - draftAngle) < 1e-9);
 
 const onItem = (x, z, y = 0.41) => {
   const p = new THREE.Vector3(x, y, z).project(latest.camera);
@@ -702,7 +708,7 @@ canvas.pointerdown(awayDown);
 canvas.pointermove({ ...awayTo, buttons: 1, ctrlKey: true });
 canvas.pointerup(awayTo);
 draw(19360);
-const free = modelNow().furniture.at(-1);
+const free = lastItem(modelNow().furniture);
 assert(free.z > flushZ + 0.3, "Ctrl drag leaves the magnet inactive");
 assert(Math.abs(free.rotation - draftAngle) < 1e-9, "Ctrl drag keeps the draft angle");
 
@@ -714,12 +720,12 @@ canvas.pointerdown(joinDown);
 canvas.pointermove({ ...joinTo, buttons: 1 });
 canvas.pointerup(joinTo);
 draw(19390);
-const joinedAgain = modelNow().furniture.at(-1);
+const joinedAgain = lastItem(modelNow().furniture);
 assert(Math.abs(joinedAgain.z - flushZ) < 1e-6, "Dragging into the partition joins it");
 assert.equal(joinedAgain.rotation, 0, "The draft is squared to the partition");
 nodes.furnishUndo.onclick();
 draw(19420);
-const reverted = modelNow().furniture.at(-1);
+const reverted = lastItem(modelNow().furniture);
 assert(
   Math.abs(reverted.rotation - draftAngle) < 1e-9,
   "Undo restores the angle the magnet squared away",
@@ -1229,7 +1235,7 @@ async function waitForSaved(after) {
 
 async function checkAutosave() {
   const key = sandbox.Eco.autosave.KEY,
-    last = modelNow().furniture.at(-1),
+    last = lastItem(modelNow().furniture),
     before = JSON.stringify(modelNow());
   storage.clear();
   assert.equal(
@@ -1434,6 +1440,7 @@ module.exports = {
   modelNow,
   selectPoint,
   storage,
+  lastItem,
   getScene: () => latest.scene,
   // The round trip rewrites the model and footer, so it runs after the autosave checks.
   previewDone: Promise.all([

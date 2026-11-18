@@ -8,6 +8,7 @@ const {
   modelNow,
   selectPoint,
   getScene,
+  lastItem,
 } = require("./check-model.cjs");
 const E = sandbox.Eco,
   catalog = sandbox.furnitureCatalog;
@@ -58,7 +59,7 @@ const add = (type, w) => {
 add("baseCabinet", 0.6);
 add("cooktop", 0.6);
 assert.equal(
-  modelNow().furniture.at(-1).y,
+  lastItem(modelNow().furniture).y,
   0.9,
   "Cooktop is installed at worktop height",
 );
@@ -69,20 +70,20 @@ assert(
 nodes.furnishY.value = "1";
 nodes.furnishApply.onclick();
 draw(22200);
-assert.equal(modelNow().furniture.at(-1).y, 1);
+assert.equal(lastItem(modelNow().furniture).y, 1);
 assert.equal(
-  getScene().getObjectByName("furniture").children.at(-1).position.y,
+  lastItem(getScene().getObjectByName("furniture").children).position.y,
   1,
   "Height applies to mesh",
 );
 nodes.furnishUndo.onclick();
 assert.equal(
-  modelNow().furniture.at(-1).y,
+  lastItem(modelNow().furniture).y,
   0.9,
   "Undo restores mounting height",
 );
 nodes.furnishRedo.onclick();
-assert.equal(modelNow().furniture.at(-1).y, 1, "Redo restores mounting height");
+assert.equal(lastItem(modelNow().furniture).y, 1, "Redo restores mounting height");
 const saved = modelNow();
 nodes.json.value = JSON.stringify(saved);
 nodes.applyJson.onclick();

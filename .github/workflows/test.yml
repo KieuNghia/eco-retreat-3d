@@ -13,8 +13,9 @@ jobs:
       fail-fast: false
       matrix:
         # The project has no dependencies; every supported Node release runs the
-        # same headless checks (engines says >=18).
-        node-version: ["18", "20", "22"]
+        # same headless checks (engines says >=18). The matrix covers that floor,
+        # the last two LTS lines and the current one, headless and GPU-free.
+        node-version: ["18", "20", "22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
